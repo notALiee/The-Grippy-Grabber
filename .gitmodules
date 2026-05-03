@@ -1,0 +1,3 @@
+[submodule "panda_mujoco"]
+	path = panda_mujoco
+	url = https://github.com/JeanElsner/panda_mujoco.git

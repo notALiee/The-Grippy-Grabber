@@ -12,13 +12,37 @@
     <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="512" />
     <texture name="plane" type="2d" builtin="checker" rgb1=".2 .3 .4" rgb2=".1 0.15 0.2" width="512" height="512" mark="cross" markrgb=".8 .8 .8" />
     <material name="plane" reflectance="0.3" texture="plane" texrepeat="1 1" texuniform="true" />
+    <!-Import custom meshes>
     <mesh name="table_mesh" file="../../World/Table.stl" scale="0.001 0.001 0.001" />
+    <mesh name="pbm" file="../../World/PuzzleBase.stl" scale="0.001 0.001 0.001" />
+    <mesh name="pcm" file="../../World/PuzzleCircle.stl" scale="0.001 0.001 0.001" />
+    <mesh name="psm" file="../../World/PuzzleSquare.stl" scale="0.001 0.001 0.001" />
+    <mesh name="ptm" file="../../World/PuzzleTriangle.stl" scale="0.001 0.001 0.001" />
+    
     <material name="table_mat" rgba="0.8 0.8 0.8 1" />
+    <material name="pbm_mat" rgba="0.8 0.8 0.8 1" />
+
   </asset>
   <include file="panda.xml" />
   <worldbody>
     <body name="table" pos="0 0 0">
       <geom type="mesh" mesh="table_mesh" material="table_mat" />
+    </body>
+    <body name="PuzzleBase" pos="0 -0.25 1">
+      <joint type="free" />
+      <geom type="mesh" mesh="pbm" material="pbm_mat"/>
+    </body>
+    <body name="PuzzleCircle" pos="0 -0.3 1">
+      <joint type="free" />
+      <geom type="mesh" mesh="pcm" material="pbm_mat"/>
+    </body>
+    <body name="PuzzleSquare" pos="-0.2 -0.3 1">
+      <joint type="free" />
+      <geom type="mesh" mesh="psm" material="pbm_mat"/>
+    </body>
+    <body name="PuzzleTriangle" pos="0.2 -0.3 1">
+      <joint type="free" />
+      <geom type="mesh" mesh="ptm" material="pbm_mat"/>
     </body>
     <body>
       <geom type="box" size=".03 .03 .03" pos=".3 0 .03" condim="6" />

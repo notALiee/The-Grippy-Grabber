@@ -13,12 +13,34 @@
     <texture name="plane" type="2d" builtin="checker" rgb1=".2 .3 .4" rgb2=".1 0.15 0.2" width="512" height="512" mark="cross" markrgb=".8 .8 .8" />
     <material name="plane" reflectance="0.3" texture="plane" texrepeat="1 1" texuniform="true" />
     <mesh name="table_mesh" file="../../World/Table.stl" scale="0.001 0.001 0.001" />
-    <material name="table_mat" rgba="0.8 0.8 0.8 1" />
-  </asset>
+    <material name="table_mat" rgba="0.2 0.6 0.8 1" />
+
+    <mesh name="cup_mesh" file="../../World/Cup.stl" scale ="0.001 0.001 0.001" />
+    <material name="cup_mat" rgba="0.2 0.6 0.8 1" />
+
+    <mesh name="book_mesh" file="../../World/Book.stl" scale ="0.001 0.001 0.001" />
+    <material name="book_mat" rgba="0.6 0.2 0.2 1" />
+
+    <mesh name="pen_mesh" file="../../World/Pen.stl" scale ="0.001 0.001 0.001" />
+    <material name="pen_mat" rgba="0.1 0.9 0.2 1" />
+</asset>
   <include file="panda.xml" />
   <worldbody>
     <body name="table" pos="0 0 0">
       <geom type="mesh" mesh="table_mesh" material="table_mat" />
+    </body>
+    <!--spawn location-->
+    <body name="cup" pos="0.4 0 0.1">
+        <joint type="free"/>
+        <geom type="mesh" mesh="cup_mesh" material="cup_mat" condim="3"/>
+    </body>
+    <body name="book" pos="0.1 0 0.1">
+        <joint type="free"/>
+        <geom type="mesh" mesh="book_mesh" material="book_mat" condim="3"/>
+    </body>
+    <body name="pen" pos="0.9 0 0.1">
+        <joint type="free"/>
+        <geom type="mesh" mesh="pen_mesh" material="pen_mat" condim="3"/>
     </body>
     <body>
       <geom type="box" size=".03 .03 .03" pos=".3 0 .03" condim="6" />

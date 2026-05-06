@@ -14,18 +14,25 @@
     <material name="plane" reflectance="0.3" texture="plane" texrepeat="1 1" texuniform="true" />
     <!-Import custom meshes>
     <mesh name="table_mesh" file="../../World/Table.stl" scale="0.001 0.001 0.001" />
+    <material name="table_mat" rgba="0.2 0.6 0.8 1" />
+
+    <!--Puzzle-->
     <mesh name="pbm" file="../../World/PuzzleBase.stl" scale="0.001 0.001 0.001" />
     <mesh name="pcm" file="../../World/PuzzleCircle.stl" scale="0.001 0.001 0.001" />
     <mesh name="psm" file="../../World/PuzzleSquare.stl" scale="0.001 0.001 0.001" />
     <mesh name="ptm" file="../../World/PuzzleTriangle.stl" scale="0.001 0.001 0.001" />
     
-    <material name="table_mat" rgba="0.2 0.6 0.8 1" />
-
+    <!--Cup-->
     <mesh name="cup_mesh" file="../../World/Cup.stl" scale ="0.001 0.001 0.001" />
-    <material name="cup_mat" rgba="0.2 0.6 0.8 1" />
+    <material name="cup_red"   rgba="1 0 0 1" />
+    <material name="cup_green" rgba="0 1 0 1" />
+    <material name="cup_blue"  rgba="0 0 1 1" />
 
+    <!--Book-->
     <mesh name="book_mesh" file="../../World/Book.stl" scale ="0.001 0.001 0.001" />
-    <material name="book_mat" rgba="0.6 0.2 0.2 1" />
+    <material name="book_red"   rgba="1 0 0 1" />
+    <material name="book_green" rgba="0 1 0 1" />
+    <material name="book_blue"  rgba="0 0 1 1" />
 
     <mesh name="pen_mesh" file="../../World/Pen.stl" scale ="0.001 0.001 0.001" />
     <material name="pen_mat" rgba="0.1 0.9 0.2 1" />
@@ -53,16 +60,50 @@
       <joint type="free" />
       <geom type="mesh" mesh="ptm" material="pbm_mat"/>
     </body>
-    <!--spawn location-->
-    <body name="cup" pos="0.4 0 0.1">
+    <!--spawn location for Cup 1-->
+    <body name="cup1" pos="0.4 0 0.1">
         <joint type="free"/>
-        <geom type="mesh" mesh="cup_mesh" material="cup_mat" condim="3"/>
+        <geom type="mesh" mesh="cup_mesh" material="cup_red" condim="3"/>
     </body>
-    <body name="book" pos="0.1 0 0.1">
+    <!-- Cup 2 -->
+    <body name="cup2" pos="0.5 0.1 0.1">
+        <joint type="free" />
+        <geom type="mesh" mesh="cup_mesh" material="cup_green" condim="3" />
+    </body>
+
+    <!-- Cup 3 -->
+    <body name="cup3" pos="0.3 -0.1 0.1"quat="1 0 0 0">
+        <joint type="free" />
+        <geom type="mesh" mesh="cup_mesh" material="cup_blue" condim="3" />
+    </body>
+
+    <!-- Book 1 -->
+    <body name="book1" pos="0.1 0 0.1"quat="0.707 0 0 0.707">
         <joint type="free"/>
-        <geom type="mesh" mesh="book_mesh" material="book_mat" condim="3"/>
+        <geom type="mesh" mesh="book_mesh" material="book_red" condim="3"/>
     </body>
-    <body name="pen" pos="0.9 0 0.1">
+    <!-- Book 2 -->
+    <body name="book2" pos="0.5 0 0.4"quat="0 0 1 0">
+        <joint type="free"/>
+        <geom type="mesh" mesh="book_mesh" material="book_green" condim="3"/>
+    </body>
+    <!-- Book 3 -->
+    <body name="book3" pos="0.8 0 0.1">
+        <joint type="free"/>
+        <geom type="mesh" mesh="book_mesh" material="book_blue" condim="3"/>
+    </body>
+    <!--Pen 1-->
+    <body name="pen1" pos="0.9 0 0.1">
+        <joint type="free"/>
+        <geom type="mesh" mesh="pen_mesh" material="pen_mat" condim="3"/>
+    </body>
+    <!--Pen 2-->
+    <body name="pen2" pos="0.3 0 0.5">
+        <joint type="free"/>
+        <geom type="mesh" mesh="pen_mesh" material="pen_mat" condim="3"/>
+    </body>
+    <!--Pen 3-->
+    <body name="pen3" pos="1 0 0.8">
         <joint type="free"/>
         <geom type="mesh" mesh="pen_mesh" material="pen_mat" condim="3"/>
     </body>

@@ -1,2 +1,3 @@
 mujoco
 opencv-python
+ultralytics

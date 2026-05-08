@@ -1,7 +1,6 @@
 <mujoco>
   <compiler angle="radian" meshdir="./mesh" texturedir="./texture" />
-  <visual>
-    <quality shadowsize="8192" offsamples="8" numslices="64" numstacks="64" />
+  <visual>    <quality shadowsize="8192" offsamples="8" numslices="64" numstacks="64" />
     <headlight active="1" />
     <rgba haze="0.15 0.25 0.35 1" />
   </visual>
@@ -61,7 +60,7 @@
       <geom type="mesh" mesh="ptm" material="pbm_mat"/>
     </body>
     <!--spawn location for Cup 1-->
-    <body name="cup1" pos="0.4 0 0.1">
+    <body name="cup1" pos="0.5 -0.675 0.1">
         <joint type="free"/>
         <geom type="mesh" mesh="cup_mesh" material="cup_red" condim="3"/>
     </body>

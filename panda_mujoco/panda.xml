@@ -28,7 +28,7 @@
     <velocity forcelimited="true" forcerange="-120 120" joint="panda_finger_joint2" kv="10" name="vel_panda_finger_joint2" user="1"/>
   </actuator>
   <worldbody>
-    <body name="panda_link0">
+    <body name="panda_link0" pos="-0.1 0.1 0">
       <geom type="mesh" material="panda" mesh="link0" />
       <inertial pos="-4.1018e-02 -1.4e-04 4.9974e-02" mass="6.29769e-01" fullinertia="3.15e-03 3.88e-03 4.285e-03 8.2904e-07 1.5e-04 8.2299e-06" />
       <body name="panda_link1" pos="0 0 0.333">

@@ -110,6 +110,14 @@
       <geom type="box" size=".03 .03 .03" pos=".3 0 .03" condim="6" />
       <joint type="free" />
     </body>
+    <body>
+      <geom type="box" size=".03 .03 .03" pos=".7 0 .4" condim="6" />
+      <joint type="free" />
+    </body>
+    <body>
+      <geom type="box" size=".03 .03 .03" pos=".8 0 .8" condim="6" />
+      <joint type="free" />
+    </body>
     <camera name="cam" mode="targetbody" pos="1 1 1" target="panda_hand" />
     <light directional="true" diffuse=".2 .2 .2" specular="0 0 0" pos="0 1 5" dir="0 -1 -1" castshadow="false"/>
     <light directional="false" diffuse=".8 .8 .8" specular="0.3 0.3 0.3" pos="0 -1 4" dir="0 0 -1" />

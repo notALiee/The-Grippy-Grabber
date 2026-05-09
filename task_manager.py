@@ -7,6 +7,7 @@ import numpy as np
 
 from control import top_down_quat
 from perception import ObjectPose, CameraView
+from planner import CartesianRRT
 
 
 class State(Enum):
@@ -46,7 +47,34 @@ GRIP_HAND_Z_OFFSET = 0.078            # detected-centroid z + this = hand z targ
                                       # 3 cm press-down on tall objects so the
                                       # fingers wrap around their middle, not
                                       # their top edge
-DROP_HAND_POS = np.array([0.0, 0.5, 0.30])  # panda_hand release pose; objects fall ~19 cm
+# Class-keyed drop zones. The arm releases each grasped object at the
+# panda_hand pose listed for its class; objects fall ~19 cm. Stacking
+# inside a zone is fine -- the planner only sees the static walls and
+# the FSM uses contact-based grasp verification, so a tower of pens
+# doesn't confuse anything. Keep all three zones inside the table
+# limits the user gave (X in [-0.25, 1.10], Y in [-0.675, 0.25]).
+DROP_HAND_Z = 0.30
+DROP_ZONES = {
+    "book":           np.array([0.30,  0.20, DROP_HAND_Z]),  # back-left of workspace
+    "cup":            np.array([0.90,  0.20, DROP_HAND_Z]),  # back-right (shared w/ pens)
+    "pen":            np.array([0.90,  0.20, DROP_HAND_Z]),
+    "PuzzleBase":     np.array([0.60, -0.60, DROP_HAND_Z]),  # front-center
+    "PuzzleCircle":   np.array([0.60, -0.60, DROP_HAND_Z]),
+    "PuzzleSquare":   np.array([0.60, -0.60, DROP_HAND_Z]),
+    "PuzzleTriangle": np.array([0.60, -0.60, DROP_HAND_Z]),
+}
+# Fallback for any unknown class -- well clear of all named zones.
+_DROP_DEFAULT = np.array([0.0, 0.50, DROP_HAND_Z])
+# Backwards-compat alias for any external code still importing the old name.
+DROP_HAND_POS = _DROP_DEFAULT
+# Detections within DROP_ZONE_INHIBIT_RADIUS of any drop zone are
+# suppressed in _look_for_target so the arm doesn't try to "grasp" the
+# object it just placed (or one stacked on top).
+DROP_ZONE_INHIBIT_RADIUS = 0.10
+
+
+def _drop_pos_for(cls: str) -> np.ndarray:
+    return DROP_ZONES.get(cls, _DROP_DEFAULT).copy()
 RETREAT_OFFSET = 0.15                 # vertical retreat after release
 PRE_PLACE_LIFT = 0.20                 # vertical lift before PLACING (gives a clear drop)
 
@@ -71,11 +99,10 @@ LIFT_SPEED = 0.12                     # m/s, lift after grasp (gentle so payload
 MIN_TRAJ_DURATION = 1.0               # s, never let trajectories get instantaneous
 STATE_TIMEOUT = 20.0                  # s, hard cap per state (raised for slower motion)
 
-# ---- Active exploration (gripper-camera-only perception) -------------------
-# Per project requirement: ALL perception comes from the gripper camera, and
-# we don't precompute a depth map. Instead the arm continuously sweeps these
-# waypoints in a loop, running gripper-cam perception every
-# EXPLORE_PERCEIVE_INTERVAL seconds. The FIRST high-confidence detection
+# ---- Active exploration (gripper-mounted cameras) ---------------------------
+# Perception uses the center + two side-facing RGB-D cameras on the hand.
+# The arm continuously sweeps EXPLORE_WAYPOINTS while running merged
+# perception every EXPLORE_PERCEIVE_INTERVAL seconds. The FIRST high-confidence detection
 # wins -- we abort the sweep, go grasp it, then come back to exploring.
 EXPLORE_WAYPOINTS = [
     np.array([0.35,  0.00, 0.60]),
@@ -88,6 +115,9 @@ EXPLORE_PERCEIVE_INTERVAL = 0.30      # s, sim time between gripper-cam percepti
 EXPLORE_MIN_SCORE = 0.80              # min YOLO confidence to even consider a target
 EXPLORE_MAX_LAPS = 2                  # full passes with zero detections -> DONE
 EXPLORE_GRIPPER_OPENING = 0.04        # m, partial-open during sweep
+# Tri-camera perception (center + 2 side gripper cams): merge radius a
+# bit wider than single-view because lateral cameras introduce parallax.
+MULTIVIEW_MERGE_RADIUS = 0.055
 
 # ---- Multi-view confirmation ----------------------------------------------
 # When EXPLORING spots a high-confidence candidate we don't immediately
@@ -115,6 +145,19 @@ CONFIRM_VIEWPOINTS_OFFSETS = [        # XY offsets (world frame, meters) around 
 # same false-positive every tick.
 FAILED_TARGET_TTL = 30.0              # s
 FAILED_TARGET_RADIUS = 0.08           # m
+
+# ---- Quick depth-probe verification (runs at detection time) ---------------
+# As soon as EXPLORING spots a candidate we don't immediately commit to it.
+# We sample the gripper-cam depth feed at the candidate XY and at +/-
+# DEPTH_PROBE_OFFSET meters on both the X and Y axes (in world frame). If
+# at least DEPTH_PROBE_MIN_HITS of those probes report a pixel that's
+# clearly above the table, the object is real and the confirming probe
+# pixels are de-projected back to world space and averaged into a refined
+# grasp center (depth-derived, no YOLO bbox bias). Otherwise the candidate
+# is treated as a ghost and EXPLORING keeps sweeping.
+DEPTH_PROBE_OFFSET = 0.0075           # m, +/-7.5 mm probe arm on X and Y
+DEPTH_PROBE_TABLE_MARGIN = 0.005      # m, must sit >=5 mm above the table
+DEPTH_PROBE_MIN_HITS = 3              # min confirming probes (out of 5)
 
 # ---- Grasp verification ----------------------------------------------------
 # After GRASP_DWELL we check whether any finger is actually in contact with
@@ -170,19 +213,26 @@ class Trajectory:
         return self.alpha(t) >= 1.0
 
 
+# Names must match <camera name="..."/> in panda.xml.
+GRIPPER_CAM_CENTER = "gripper_camera"
+GRIPPER_CAM_SIDE_NAMES = ("gripper_depth_side_ypos", "gripper_depth_side_yneg")
+
+
 # ----------------------------------------------------------------------------
 # Renderer bundle handed to the FSM by main.py
 #
-# Per project requirement: perception is gripper-camera-only. This bundle
-# carries the gripper RGB + depth renderers, gripper intrinsics, and an
-# optional MjvOption that hides the robot (group=2) so the fingers don't
-# occlude the depth map during scan/centering.
+# Center gripper cam + two side-facing RGB-D cams on the hand. All use the
+# same scene_option (robot hidden) during perception so fingers don’t
+# corrupt depth.
 # ----------------------------------------------------------------------------
 @dataclass
 class _SceneRenderers:
     gripper_rgb_renderer: object
     gripper_depth_renderer: object
     gripper_intrinsics: dict
+    side_rgb_renderers: Tuple[object, object]
+    side_depth_renderers: Tuple[object, object]
+    side_intrinsics: Tuple[dict, dict]
     scene_option: object = None       # MjvOption hiding robot (group=2) for perception
 
 
@@ -219,25 +269,100 @@ def _get_gripper_opening(target: ObjectPose) -> float:
     return class_openings.get(target.class_name, 0.08)  # Default to full opening
 
 
-def _capture_gripper_view(data, renderers: _SceneRenderers,
-                          name: str = "gripper") -> CameraView:
+def _depth_probe_verify(view: CameraView, candidate: ObjectPose,
+                        offset: float = DEPTH_PROBE_OFFSET,
+                        table_margin: float = DEPTH_PROBE_TABLE_MARGIN,
+                        min_hits: int = DEPTH_PROBE_MIN_HITS
+                        ) -> Optional[ObjectPose]:
     """
-    Render a single RGB+depth frame from the gripper camera with the robot
-    hidden (group=2) so the fingers/hand don't appear in the depth map. Stamps
-    the camera world pose (cam_xpos, cam_xmat) at this exact moment so we can
-    de-project pixels into world coordinates.
+    Quick depth-feed sanity check + recenter. Probes the depth image at
+    the candidate XY plus +/- `offset` on both X and Y axes (5 probes).
+    Each probe pixel must report a depth value clearly closer than the
+    table to count as a hit. If at least `min_hits` probes hit, the
+    confirming probes are de-projected back to world coordinates and
+    averaged into a depth-derived grasp center; otherwise None.
     """
-    rgb_r = renderers.gripper_rgb_renderer
-    dep_r = renderers.gripper_depth_renderer
-    intr = renderers.gripper_intrinsics
-    so = renderers.scene_option
+    depth = np.asarray(view.depth, dtype=np.float32)
+    H, W = depth.shape[:2]
+    finite = depth[np.isfinite(depth) & (depth > 0)]
+    if finite.size < 200:
+        return None
+    table_depth = float(np.median(finite))
 
+    intr = view.intrinsics
+    f = float(intr["f"])
+    cx_intr = float(intr["cx"])
+    cy_intr = float(intr["cy"])
+    R = np.asarray(view.cam_xmat).reshape(3, 3)
+    cam_xpos = np.asarray(view.cam_xpos)
+    obj_z = float(candidate.position[2])
+
+    def world_to_pixel(world_xy):
+        # Project a world-frame point at the object's z back into the
+        # depth image. Returns (u, v) ints or None if off-frame / behind.
+        p_cam = R.T @ (np.array([world_xy[0], world_xy[1], obj_z]) - cam_xpos)
+        z = -float(p_cam[2])  # MuJoCo cam looks down its -Z axis
+        if z <= 0.01:
+            return None
+        u = p_cam[0] * f / z + cx_intr
+        v = -p_cam[1] * f / z + cy_intr
+        if not (0 <= u < W and 0 <= v < H):
+            return None
+        return int(round(u)), int(round(v))
+
+    base_xy = candidate.position[:2]
+    probes_xy = [
+        base_xy,
+        base_xy + np.array([+offset, 0.0]),
+        base_xy + np.array([-offset, 0.0]),
+        base_xy + np.array([0.0, +offset]),
+        base_xy + np.array([0.0, -offset]),
+    ]
+
+    hits_world_xy: List[np.ndarray] = []
+    for p_xy in probes_xy:
+        px = world_to_pixel(p_xy)
+        if px is None:
+            continue
+        u, v = px
+        d = float(depth[v, u])
+        if not (np.isfinite(d) and d > 0.01 and d < table_depth - table_margin):
+            continue
+        # De-project the hit pixel back to world (matches perception convention).
+        x_cam = (u - cx_intr) * d / f
+        y_cam = -(v - cy_intr) * d / f
+        z_cam = -d
+        p_world = R @ np.array([x_cam, y_cam, z_cam]) + cam_xpos
+        hits_world_xy.append(p_world[:2])
+
+    if len(hits_world_xy) < min_hits:
+        return None
+
+    refined_xy = np.mean(np.stack(hits_world_xy, axis=0), axis=0)
+    refined_pos = candidate.position.copy()
+    refined_pos[:2] = refined_xy
+    return ObjectPose(
+        class_name=candidate.class_name,
+        position=refined_pos,
+        quaternion=candidate.quaternion,
+        score=candidate.score,
+        n_points=candidate.n_points,
+        principal_axis=candidate.principal_axis,
+        source_cam=candidate.source_cam,
+    )
+
+
+def _capture_single_camera_view(
+        data, renderers: _SceneRenderers,
+        rgb_r, dep_r, cam_name: str, intr: dict, name: str) -> CameraView:
+    """One RGB+depth frame from a named MuJoCo camera; robot hidden via scene_option."""
+    so = renderers.scene_option
     if so is not None:
-        rgb_r.update_scene(data, camera="gripper_camera", scene_option=so)
-        dep_r.update_scene(data, camera="gripper_camera", scene_option=so)
+        rgb_r.update_scene(data, camera=cam_name, scene_option=so)
+        dep_r.update_scene(data, camera=cam_name, scene_option=so)
     else:
-        rgb_r.update_scene(data, camera="gripper_camera")
-        dep_r.update_scene(data, camera="gripper_camera")
+        rgb_r.update_scene(data, camera=cam_name)
+        dep_r.update_scene(data, camera=cam_name)
     rgb = rgb_r.render()
     depth = dep_r.render()
     cam_id = intr["cam_id"]
@@ -249,6 +374,49 @@ def _capture_gripper_view(data, renderers: _SceneRenderers,
         cam_xpos=data.cam_xpos[cam_id].copy(),
         cam_xmat=data.cam_xmat[cam_id].copy(),
     )
+
+
+def _capture_gripper_view(data, renderers: _SceneRenderers,
+                          name: str = "gripper") -> CameraView:
+    """
+    Downward center gripper camera only (used for DESCEND-refine depth
+    contour + depth-probe, where we want the unbiased overhead ray).
+    """
+    return _capture_single_camera_view(
+        data, renderers,
+        renderers.gripper_rgb_renderer,
+        renderers.gripper_depth_renderer,
+        GRIPPER_CAM_CENTER,
+        renderers.gripper_intrinsics,
+        name,
+    )
+
+
+def _capture_tri_gripper_views(data, renderers: _SceneRenderers) -> List[CameraView]:
+    """
+    Center + two side-facing gripper cameras. Feeds perception.scan_multi
+    so YOLO/depth fuse across views (less blind volume beside the fingers).
+    """
+    views: List[CameraView] = [
+        _capture_single_camera_view(
+            data, renderers,
+            renderers.gripper_rgb_renderer,
+            renderers.gripper_depth_renderer,
+            GRIPPER_CAM_CENTER,
+            renderers.gripper_intrinsics,
+            "gripper_center",
+        ),
+    ]
+    for i, cam_name in enumerate(GRIPPER_CAM_SIDE_NAMES):
+        views.append(_capture_single_camera_view(
+            data, renderers,
+            renderers.side_rgb_renderers[i],
+            renderers.side_depth_renderers[i],
+            cam_name,
+            renderers.side_intrinsics[i],
+            f"gripper_side_{i}",
+        ))
+    return views
 
 
 # ----------------------------------------------------------------------------
@@ -276,10 +444,35 @@ class TaskFSM:
         self._desired_pos: np.ndarray = np.array([0.3, 0.0, SAFE_Z])
         self._desired_quat: np.ndarray = top_down_quat(0.0)
 
+        # RRT-planned multi-leg path. _waypoints[0] is the start of the
+        # current leg, _waypoints[-1] is the goal. _waypoint_idx points
+        # at the END of the leg the current Trajectory is animating; on
+        # leg completion we advance the index and build the next
+        # Trajectory. Empty list / idx >= len means "no path active".
+        self._waypoints: List[np.ndarray] = []
+        self._waypoint_idx: int = 0
+        self._leg_end_quat: np.ndarray = top_down_quat(0.0)
+        self._leg_speed: float = TRANSIT_SPEED
+
+        # One Cartesian RRT instance, reused across all transit moves.
+        self._rrt = CartesianRRT()
+
         # Active-exploration bookkeeping.
         self._explore_idx: int = 0            # next EXPLORE_WAYPOINTS entry
         self._explore_perceive_t: float = -1e9  # last perception time (sim seconds)
         self._explore_lap: int = 0            # full passes with no detection
+
+        # Multi-view CONFIRMING bookkeeping. _confirm_idx walks
+        # CONFIRM_VIEWPOINTS_OFFSETS; _confirm_hits accumulates
+        # successful re-detections (one per viewpoint at most).
+        self._confirm_idx: int = 0
+        self._confirm_arrived_t: Optional[float] = None
+        self._confirm_hits: List[ObjectPose] = []
+
+        # Failed-target memory: list of (xy, expiry_time) tuples. New
+        # candidates within FAILED_TARGET_RADIUS of any unexpired entry
+        # are skipped so we don't re-lock onto the same false positive.
+        self._failed_targets: List[Tuple[np.ndarray, float]] = []
 
         # Grasp verification state. Set by VERIFY_GRASP, consumed by LIFTING.
         self._grasp_success: bool = False
@@ -314,6 +507,8 @@ class TaskFSM:
 
         if self.state == State.EXPLORING:
             self._do_exploring(t_sim, elapsed, model, data, perception, robot, renderers)
+        elif self.state == State.CONFIRMING:
+            self._do_confirming(t_sim, elapsed, data, perception, robot, renderers, timed_out)
         elif self.state == State.PLANNING:
             self._do_planning(t_sim, robot)
         elif self.state == State.HOMING:
@@ -345,18 +540,107 @@ class TaskFSM:
     def _enter(self, new_state: State):
         if new_state != self.state:
             print(f"[FSM] {self.state.name} -> {new_state.name}")
+            # Leaving CONFIRMING through any code path (including
+            # success/timeout inside _do_confirming) clears the orbit
+            # state so the next confirm cycle starts fresh.
+            if self.state == State.CONFIRMING and new_state != State.CONFIRMING:
+                self._reset_confirm_state()
             self.state = new_state
         self._state_t0 = None
         self._traj = None
         self._dwell_t0 = None
+        self._waypoints = []
+        self._waypoint_idx = 0
 
-    def _start_traj(self, t_sim, robot, end_pos, end_quat, speed):
+    def _start_traj(self, t_sim, robot, end_pos, end_quat, speed,
+                    use_rrt: bool = True):
+        """
+        Build a (multi-leg if RRT-planned) Cartesian path from the
+        current hand pose to `end_pos` at `end_quat`. Each leg is a
+        smoothstep Trajectory; on leg completion `_track_traj` rolls
+        forward to the next one until the whole path is done. Falls
+        back to a straight segment if RRT can't find a route.
+        """
         cur_pos, cur_quat = robot.hand_pose()
-        self._traj = Trajectory.build(cur_pos, cur_quat, end_pos, end_quat, t_sim, speed)
+        end_pos = np.asarray(end_pos, dtype=float)
+        end_quat = np.asarray(end_quat, dtype=float)
+
+        path: Optional[List[np.ndarray]] = None
+        if use_rrt:
+            try:
+                path = self._rrt.plan(cur_pos, end_pos)
+            except Exception as e:
+                print(f"[FSM] RRT planner failed ({e}); using straight segment")
+                path = None
+
+        if path is None or len(path) < 2:
+            # Either RRT was disabled, planner failed, or already trivial.
+            self._waypoints = [cur_pos.copy(), end_pos.copy()]
+            if use_rrt and path is None:
+                print("[FSM] WARNING: RRT found no path — using straight line "
+                      "(collision risk)")
+        else:
+            self._waypoints = [np.asarray(p, dtype=float).copy() for p in path]
+
+        self._waypoint_idx = 1
+        self._leg_end_quat = end_quat
+        self._leg_speed = float(speed)
+
+        # First leg: start hand pose -> first intermediate waypoint.
+        self._traj = self._build_leg_traj(cur_pos, cur_quat, t_sim)
+        if len(self._waypoints) > 2:
+            print(f"[FSM] RRT path: {len(self._waypoints)} waypoints "
+                  f"({sum(float(np.linalg.norm(self._waypoints[i+1] - self._waypoints[i])) for i in range(len(self._waypoints)-1))*100:.0f}cm total)")
+
+    def _build_leg_traj(self, start_pos: np.ndarray, start_quat: np.ndarray,
+                        t_sim: float) -> Trajectory:
+        """
+        Build the smoothstep Trajectory for the leg ending at
+        self._waypoints[self._waypoint_idx]. Quaternion slerps from
+        start_quat to a partial-blend toward _leg_end_quat sized by
+        this leg's share of the remaining path length, so by the time
+        the final leg finishes the orientation has reached
+        _leg_end_quat exactly.
+        """
+        end_pos = self._waypoints[self._waypoint_idx]
+        # Leg's share of the remaining-path length (avoids huge orientation
+        # snaps on short last-mile legs).
+        remaining = sum(
+            float(np.linalg.norm(self._waypoints[i + 1] - self._waypoints[i]))
+            for i in range(self._waypoint_idx - 1, len(self._waypoints) - 1)
+        )
+        leg_len = float(np.linalg.norm(end_pos - start_pos))
+        if remaining > 1e-6:
+            leg_alpha = float(np.clip(leg_len / remaining, 0.0, 1.0))
+        else:
+            leg_alpha = 1.0
+        leg_end_quat = _quat_nlerp(start_quat, self._leg_end_quat, leg_alpha)
+        return Trajectory.build(start_pos, start_quat, end_pos, leg_end_quat,
+                                t_sim, self._leg_speed)
 
     def _track_traj(self, t_sim):
-        if self._traj is not None:
-            self._desired_pos, self._desired_quat = self._traj.pose_at(t_sim)
+        if self._traj is None:
+            return
+        self._desired_pos, self._desired_quat = self._traj.pose_at(t_sim)
+        # Auto-roll to the next leg of an RRT path on leg completion.
+        if (self._traj.done(t_sim)
+                and self._waypoint_idx + 1 < len(self._waypoints)):
+            self._waypoint_idx += 1
+            self._traj = self._build_leg_traj(
+                self._waypoints[self._waypoint_idx - 1].copy(),
+                self._desired_quat.copy(),
+                t_sim,
+            )
+
+    def _traj_fully_done(self, t_sim: float) -> bool:
+        """True iff the current trajectory AND all remaining waypoints
+        of the active RRT path are complete. States should use this in
+        place of `self._traj.done(t_sim)` so they only advance when the
+        full multi-leg path has been animated."""
+        if self._traj is None:
+            return True
+        return (self._traj.done(t_sim)
+                and self._waypoint_idx + 1 >= len(self._waypoints))
 
     # ------------------------------------------------------------------
     # State implementations
@@ -396,26 +680,29 @@ class TaskFSM:
         # Rate-limited gripper-cam perception while moving.
         if (t_sim - self._explore_perceive_t) >= EXPLORE_PERCEIVE_INTERVAL:
             self._explore_perceive_t = t_sim
-            target = self._look_for_target(data, perception, robot, renderers)
+            self._prune_failed_targets(t_sim)
+            target = self._look_for_target(data, perception, robot, renderers, t_sim)
             if target is not None:
                 self.target = target
                 self._explore_lap = 0  # we found something, reset lap counter
                 self._traj = None
                 print(f"[FSM] EXPLORING: spotted {target.class_name} "
                       f"score={target.score:.2f} at {target.position}")
-                self._enter(State.PLANNING)
+                self._enter(State.CONFIRMING)
                 return
 
         # Reached this waypoint? Go to the next one on the next tick.
-        if self._traj is not None and self._traj.done(t_sim):
+        if self._traj is not None and self._traj_fully_done(t_sim):
             self._explore_idx += 1
             self._traj = None
+            self._waypoints = []
 
-    def _look_for_target(self, data, perception, robot, renderers) -> Optional[ObjectPose]:
+    def _look_for_target(self, data, perception, robot, renderers,
+                         t_sim: float = 0.0) -> Optional[ObjectPose]:
         """
-        Capture a single gripper-cam frame, run YOLO + pose estimation, and
-        return the best candidate target (or None). Uses scan_scene which
-        already handles depth-band masking + per-class quaternion synthesis.
+        Capture gripper RGB-D from the center + two side-facing cameras,
+        run YOLO + pose per view and merge via scan_multi (handles occlusion
+        where the top-down cam is blind).
         Also rejects targets that are physically unsafe to grasp:
           - too close to the Panda base (arm has to fold tightly + sweeps
             through neighboring objects, which has caused NaN-level contact
@@ -423,9 +710,10 @@ class TaskFSM:
           - off-table z range
         """
         view = _capture_gripper_view(data, renderers, name="explore")
-        poses = perception.scan_scene(
-            view.rgb, view.depth, view.cam_xpos, view.cam_xmat,
-            view.intrinsics, min_points=20, min_score=EXPLORE_MIN_SCORE,
+        views = _capture_tri_gripper_views(data, renderers)
+        poses = perception.scan_multi(
+            views, min_points=20, min_score=EXPLORE_MIN_SCORE,
+            merge_radius=MULTIVIEW_MERGE_RADIUS,
         )
         if not poses:
             return None
@@ -449,18 +737,225 @@ class TaskFSM:
         in_reach = []
         for p in poses:
             r = float(np.linalg.norm(p.position[:2] - BASE_XY))
-            if MIN_REACH <= r <= MAX_REACH:
-                in_reach.append(p)
-            else:
+            if not (MIN_REACH <= r <= MAX_REACH):
                 print(f"[FSM] EXPLORING: skipping {p.class_name} at "
                       f"{p.position} (reach={r*1000:.0f}mm out of "
                       f"[{MIN_REACH*1000:.0f},{MAX_REACH*1000:.0f}]mm)")
+                continue
+            if self._is_failed_target(p.position[:2], t_sim):
+                print(f"[FSM] EXPLORING: skipping {p.class_name} at "
+                      f"{p.position} (recently failed CONFIRMING)")
+                continue
+            if self._is_in_drop_zone(p.position[:2]):
+                print(f"[FSM] EXPLORING: skipping {p.class_name} at "
+                      f"{p.position} (within drop-zone inhibit radius)")
+                continue
+            in_reach.append(p)
         if not in_reach:
             return None
 
         # Highest confidence wins. Tie-break on number of supporting depth points.
         in_reach.sort(key=lambda p: (-p.score, -p.n_points))
-        return in_reach[0]
+
+        # Quick depth-feed verification at +/- DEPTH_PROBE_OFFSET on X and Y.
+        # Walk best-first; first candidate that survives the probe wins. Anything
+        # that fails is treated as a perception ghost and we keep sweeping.
+        for cand in in_reach:
+            verified = _depth_probe_verify(view, cand)
+            if verified is not None:
+                shift_mm = (verified.position[:2] - cand.position[:2]) * 1000.0
+                print(f"[FSM] EXPLORING: depth-probe verified {cand.class_name} "
+                      f"(+/-{DEPTH_PROBE_OFFSET*1000:.1f}mm probes), "
+                      f"recenter shift=({shift_mm[0]:+.1f},{shift_mm[1]:+.1f})mm")
+                return verified
+            print(f"[FSM] EXPLORING: depth-probe REJECTED {cand.class_name} "
+                  f"at {cand.position} (no consistent above-table depth)")
+        return None
+
+    # ------------------------------------------------------------------
+    # Failed-target memory
+    # ------------------------------------------------------------------
+    def _prune_failed_targets(self, t_sim: float) -> None:
+        """Drop expired entries from `_failed_targets`."""
+        if not self._failed_targets:
+            return
+        self._failed_targets = [(xy, exp) for xy, exp in self._failed_targets
+                                if exp > t_sim]
+
+    def _is_failed_target(self, xy: np.ndarray, t_sim: float) -> bool:
+        """True iff `xy` is within FAILED_TARGET_RADIUS of an unexpired
+        failed-target entry."""
+        for fxy, exp in self._failed_targets:
+            if exp <= t_sim:
+                continue
+            if float(np.linalg.norm(np.asarray(xy) - fxy)) < FAILED_TARGET_RADIUS:
+                return True
+        return False
+
+    def _remember_failed_target(self, xy: np.ndarray, t_sim: float) -> None:
+        """Record `xy` as a failed CONFIRMING target with the standard
+        TTL so EXPLORING doesn't re-lock onto the same false positive."""
+        self._failed_targets.append((np.asarray(xy, dtype=float).copy(),
+                                     t_sim + FAILED_TARGET_TTL))
+
+    @staticmethod
+    def _is_in_drop_zone(xy: np.ndarray) -> bool:
+        """True iff `xy` is within DROP_ZONE_INHIBIT_RADIUS of any drop
+        zone XY -- prevents the arm from re-grasping objects it (or a
+        previous run) just placed."""
+        xy_arr = np.asarray(xy)
+        for zone in DROP_ZONES.values():
+            if float(np.linalg.norm(xy_arr - zone[:2])) < DROP_ZONE_INHIBIT_RADIUS:
+                return True
+        return False
+
+    # ------------------------------------------------------------------
+    # CONFIRMING: orbit + multi-view re-scan
+    # ------------------------------------------------------------------
+    def _do_confirming(self, t_sim, elapsed, data, perception, robot,
+                       renderers, timed_out):
+        """
+        After EXPLORING locks onto a candidate, orbit the gripper camera
+        through CONFIRM_VIEWPOINTS_OFFSETS and re-run YOLO + depth at
+        each viewpoint. The robot physically moves a few cm between
+        snapshots; this disambiguates real objects (which appear at the
+        same world XY across viewpoints) from depth-noise ghosts
+        (which don't), and the parallax also gives the depth-derived
+        center much better accuracy than any single bird's-eye frame.
+
+        Decision:
+          - >= CONFIRM_REQUIRED_HITS same-class detections within
+            CONFIRM_MAX_XY_DRIFT of the original  -> refine
+            target.position to the (n_points-weighted) mean of the
+            confirming detections, transition to PLANNING.
+          - otherwise -> remember as failed target, transition to
+            EXPLORING. The TTL keeps us from immediately re-locking.
+        """
+        if self.target is None:
+            self._enter(State.EXPLORING)
+            return
+
+        # Pre-size the gripper to the class-specific opening so it's
+        # already settled by the time we reach LOWERING.
+        robot.open_gripper(_get_gripper_opening(self.target))
+
+        # Move to the next viewpoint if we don't have a trajectory.
+        if self._traj is None and self._confirm_idx < len(CONFIRM_VIEWPOINTS_OFFSETS):
+            offset = CONFIRM_VIEWPOINTS_OFFSETS[self._confirm_idx]
+            end_pos = np.array([self.target.position[0] + offset[0],
+                                self.target.position[1] + offset[1],
+                                CONFIRM_HOVER_Z])
+            self._start_traj(t_sim, robot, end_pos, self.target.quaternion,
+                             TRANSIT_SPEED)
+            self._confirm_arrived_t = None
+            print(f"[FSM] CONFIRMING: viewpoint "
+                  f"{self._confirm_idx + 1}/{len(CONFIRM_VIEWPOINTS_OFFSETS)} "
+                  f"offset=({offset[0]*100:+.0f},{offset[1]*100:+.0f})cm")
+
+        self._track_traj(t_sim)
+
+        if timed_out:
+            print(f"[FSM] CONFIRMING timeout with {len(self._confirm_hits)} hits, "
+                  f"abandoning {self.target.class_name}")
+            self._remember_failed_target(self.target.position[:2], t_sim)
+            self._reset_confirm_state()
+            self.target = None
+            self._enter(State.EXPLORING)
+            return
+
+        # Wait for the move to finish, then settle, then snap.
+        if self._traj_fully_done(t_sim):
+            if self._confirm_arrived_t is None:
+                self._confirm_arrived_t = t_sim
+            elif (t_sim - self._confirm_arrived_t) >= CONFIRM_SETTLE_TIME:
+                # Take a snapshot and try to find the same class within
+                # CONFIRM_MAX_XY_DRIFT.
+                views = _capture_tri_gripper_views(data, renderers)
+                poses = perception.scan_multi(
+                    views, min_points=20,
+                    min_score=CONFIRM_MIN_SCORE,
+                    merge_radius=MULTIVIEW_MERGE_RADIUS,
+                )
+                hit = self._best_confirm_hit(poses)
+                if hit is not None:
+                    self._confirm_hits.append(hit)
+                    print(f"[FSM] CONFIRMING: hit #{len(self._confirm_hits)} "
+                          f"({hit.class_name} score={hit.score:.2f} at "
+                          f"{hit.position})")
+                else:
+                    print(f"[FSM] CONFIRMING: viewpoint "
+                          f"{self._confirm_idx + 1} -> no matching detection")
+
+                # Advance to next viewpoint.
+                self._confirm_idx += 1
+                self._traj = None
+                self._waypoints = []
+                self._confirm_arrived_t = None
+
+        # All viewpoints visited -> decide.
+        if (self._confirm_idx >= len(CONFIRM_VIEWPOINTS_OFFSETS)
+                and self._traj is None):
+            if len(self._confirm_hits) >= CONFIRM_REQUIRED_HITS:
+                refined = self._fuse_confirm_hits()
+                self.target = refined
+                print(f"[FSM] CONFIRMING: PASSED ({len(self._confirm_hits)} "
+                      f"hits) -> refined target {refined.class_name} at "
+                      f"{refined.position}")
+                self._reset_confirm_state()
+                self._enter(State.PLANNING)
+            else:
+                print(f"[FSM] CONFIRMING: FAILED ({len(self._confirm_hits)} "
+                      f"hits, need {CONFIRM_REQUIRED_HITS}) -> EXPLORING")
+                self._remember_failed_target(self.target.position[:2], t_sim)
+                self._reset_confirm_state()
+                self.target = None
+                self._enter(State.EXPLORING)
+
+    def _reset_confirm_state(self) -> None:
+        self._confirm_idx = 0
+        self._confirm_arrived_t = None
+        self._confirm_hits = []
+
+    def _best_confirm_hit(self, poses: List[ObjectPose]) -> Optional[ObjectPose]:
+        """Pick the highest-confidence detection that matches the
+        candidate class and lies within CONFIRM_MAX_XY_DRIFT of the
+        candidate XY. Returns None if no detection qualifies."""
+        if not poses or self.target is None:
+            return None
+        cand_xy = self.target.position[:2]
+        cls = self.target.class_name
+        best = None
+        best_key = (0.0, 0)
+        for p in poses:
+            if p.class_name != cls:
+                continue
+            if float(np.linalg.norm(p.position[:2] - cand_xy)) > CONFIRM_MAX_XY_DRIFT:
+                continue
+            key = (p.score, p.n_points)
+            if key > best_key:
+                best_key = key
+                best = p
+        return best
+
+    def _fuse_confirm_hits(self) -> ObjectPose:
+        """Average the confirming detections' XYs (weighted by
+        n_points). Keeps the highest-confidence quaternion + class."""
+        assert self._confirm_hits
+        weights = np.array([max(h.n_points, 1) for h in self._confirm_hits],
+                           dtype=float)
+        positions = np.stack([h.position for h in self._confirm_hits], axis=0)
+        fused_pos = np.average(positions, axis=0, weights=weights)
+        # Z stays as the visible-top depth value already estimated.
+        best = max(self._confirm_hits, key=lambda h: (h.score, h.n_points))
+        return ObjectPose(
+            class_name=best.class_name,
+            position=fused_pos,
+            quaternion=best.quaternion,
+            score=best.score,
+            n_points=int(weights.sum()),
+            principal_axis=best.principal_axis,
+            source_cam=best.source_cam,
+        )
 
     def _refine_target_xy(self, robot):
         """
@@ -627,19 +1122,22 @@ class TaskFSM:
         # before every grasp. This resets the redundant 7-DoF arm to a
         # known null-space configuration; otherwise APPROACHING from
         # whatever pose we ended up in often gets stuck at a joint limit.
+        # Routed through RRT in case a wall sits between the post-grasp
+        # pose and the home pose.
         if self._traj is None:
             assert self.target is not None
             self._start_traj(t_sim, robot, HOME_HAND_POS, self.target.quaternion,
                              TRANSIT_SPEED)
         self._track_traj(t_sim)
         robot.open_gripper(_get_gripper_opening(self.target))
-        if (self._traj is not None and self._traj.done(t_sim)) or timed_out:
+        if self._traj_fully_done(t_sim) or timed_out:
             if timed_out:
                 print("[FSM] HOMING timeout, advancing.")
             self._enter(State.APPROACHING)
 
     def _do_approaching(self, t_sim, robot, timed_out):
-        # Horizontal move to (target.x, target.y, SAFE_Z) at target orientation.
+        # Horizontal move to (target.x, target.y, SAFE_Z) at target
+        # orientation, RRT-planned around walls.
         assert self.target is not None
         if self._traj is None:
             end_pos = np.array([self.target.position[0],
@@ -648,7 +1146,7 @@ class TaskFSM:
             self._start_traj(t_sim, robot, end_pos, self.target.quaternion, TRANSIT_SPEED)
         self._track_traj(t_sim)
         robot.open_gripper(_get_gripper_opening(self.target))
-        if (self._traj is not None and self._traj.done(t_sim)) or timed_out:
+        if self._traj_fully_done(t_sim) or timed_out:
             if timed_out:
                 print("[FSM] APPROACHING timeout, advancing.")
             self._enter(State.DESCENDING)
@@ -672,8 +1170,11 @@ class TaskFSM:
             end_pos = np.array([self.target.position[0],
                                 self.target.position[1],
                                 PRE_GRASP_HOVER_Z])
+            # use_rrt=False: descent is straight-down inside the verified
+            # depth-clear column above the target; planning around walls
+            # would only invent detours.
             self._start_traj(t_sim, robot, end_pos, self.target.quaternion,
-                             DESCEND_SPEED)
+                             DESCEND_SPEED, use_rrt=False)
         self._track_traj(t_sim)
         robot.open_gripper(_get_gripper_opening(self.target))
         if (self._traj is not None and self._traj.done(t_sim)) or timed_out:
@@ -695,7 +1196,7 @@ class TaskFSM:
                                 self.target.position[1],
                                 _grip_hand_z(self.target)])
             self._start_traj(t_sim, robot, end_pos, self.target.quaternion,
-                             LOWERING_SPEED)
+                             LOWERING_SPEED, use_rrt=False)
             print(f"[FSM] LOWERING: gentle descent to grip_hand_z="
                   f"{end_pos[2]:.3f} at {LOWERING_SPEED*1000:.0f}mm/s")
         self._track_traj(t_sim)
@@ -774,7 +1275,8 @@ class TaskFSM:
             end_pos = np.array([cur_pos[0], cur_pos[1], SAFE_Z])
             quat = (self.target.quaternion if self.target is not None
                     else top_down_quat(0.0))
-            self._start_traj(t_sim, robot, end_pos, quat, LIFT_SPEED)
+            self._start_traj(t_sim, robot, end_pos, quat, LIFT_SPEED,
+                             use_rrt=False)
         self._track_traj(t_sim)
 
         if self._grasp_success:
@@ -796,22 +1298,24 @@ class TaskFSM:
                 self._enter(State.EXPLORING)
 
     def _do_transporting(self, t_sim, robot, timed_out):
-        # Horizontal move to over the drop zone.
+        # RRT-routed move to over the class-specific drop zone.
         assert self.target is not None
         if self._traj is None:
-            end_pos = np.array([DROP_HAND_POS[0], DROP_HAND_POS[1], SAFE_Z])
-            self._start_traj(t_sim, robot, end_pos, self.target.quaternion, TRANSIT_SPEED)
+            drop_pos = _drop_pos_for(self.target.class_name)
+            end_pos = np.array([drop_pos[0], drop_pos[1], SAFE_Z])
+            self._start_traj(t_sim, robot, end_pos, self.target.quaternion,
+                             TRANSIT_SPEED)
         self._track_traj(t_sim)
         robot.close_gripper()
-        if (self._traj is not None and self._traj.done(t_sim)) or timed_out:
+        if self._traj_fully_done(t_sim) or timed_out:
             if timed_out:
                 print("[FSM] TRANSPORTING timeout, advancing.")
             self._enter(State.PLACING)
 
     def _do_placing(self, t_sim, elapsed, robot):
         # Hold drop pose, open fingers, dwell.
-        self._desired_pos = DROP_HAND_POS
         if self.target is not None:
+            self._desired_pos = _drop_pos_for(self.target.class_name)
             self._desired_quat = self.target.quaternion
         robot.open_gripper()
         if elapsed >= PLACE_DWELL:
@@ -823,7 +1327,8 @@ class TaskFSM:
         if self._traj is None:
             cur_pos, cur_quat = robot.hand_pose()
             end_pos = np.array([cur_pos[0], cur_pos[1], SAFE_Z + RETREAT_OFFSET])
-            self._start_traj(t_sim, robot, end_pos, cur_quat, LIFT_SPEED)
+            self._start_traj(t_sim, robot, end_pos, cur_quat, LIFT_SPEED,
+                             use_rrt=False)
         self._track_traj(t_sim)
         robot.open_gripper()
         if (self._traj is not None and self._traj.done(t_sim)) or timed_out:

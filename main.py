@@ -7,14 +7,7 @@ import numpy as np
 
 from control import PandaController
 from perception import PerceptionSystem, get_intrinsics
-from task_manager import TaskFSM, _SceneRenderers
-
-
-# Per project requirement: ALL perception happens through the gripper camera.
-# We keep one static "scene_camera" rendered in the debug video for visual
-# context (so the user can see what the arm is doing), but YOLO is never run
-# on it.
-DEBUG_SCENE_CAM = "scene_camera"
+from task_manager import GRIPPER_CAM_SIDE_NAMES, TaskFSM, _SceneRenderers
 
 
 def _make_scene_option(model):
@@ -51,15 +44,24 @@ def main():
 
     width, height = 640, 480
 
-    # Gripper camera: this is the ONLY perception input. Used by the FSM during
-    # EXPLORING (active sweep + per-tick perception) and CENTERING (final depth refinement).
+    # Gripper-mounted perception: center (top-down) + two side-facing RGB-D
+    # cameras. The FSM merges detections across all three (task_manager
+    # scan_multi).
     rgb_gripper = mujoco.Renderer(model, height=height, width=width)
     depth_gripper = mujoco.Renderer(model, height=height, width=width)
     depth_gripper.enable_depth_rendering()
     gripper_intrinsics = get_intrinsics(model, "gripper_camera", width, height)
 
-    # Debug-only static scene camera (not used for perception).
-    rgb_debug = mujoco.Renderer(model, height=height, width=width)
+    side_rgb_renderers = []
+    side_depth_renderers = []
+    side_intrinsics_list = []
+    for cam_name in GRIPPER_CAM_SIDE_NAMES:
+        r_side = mujoco.Renderer(model, height=height, width=width)
+        d_side = mujoco.Renderer(model, height=height, width=width)
+        d_side.enable_depth_rendering()
+        side_rgb_renderers.append(r_side)
+        side_depth_renderers.append(d_side)
+        side_intrinsics_list.append(get_intrinsics(model, cam_name, width, height))
 
     scene_option = _make_scene_option(model)
 
@@ -68,6 +70,9 @@ def main():
         gripper_rgb_renderer=rgb_gripper,
         gripper_depth_renderer=depth_gripper,
         gripper_intrinsics=gripper_intrinsics,
+        side_rgb_renderers=(side_rgb_renderers[0], side_rgb_renderers[1]),
+        side_depth_renderers=(side_depth_renderers[0], side_depth_renderers[1]),
+        side_intrinsics=(side_intrinsics_list[0], side_intrinsics_list[1]),
         scene_option=scene_option,
     )
 
@@ -75,8 +80,8 @@ def main():
     print("Tip: Expand the right side panel in the viewer to change the camera view.")
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    # Layout: side-by-side: [scene_camera (debug)] [gripper_camera (live)]
-    out = cv2.VideoWriter("output.mp4", fourcc, 10.0, (width * 2, height))
+    # Recording: only gripper-mounted RGB (center + two side cams). No world cameras.
+    out = cv2.VideoWriter("output.mp4", fourcc, 10.0, (width * 3, height))
 
     with mujoco.viewer.launch_passive(model, data) as viewer:
         last_render_time = data.time
@@ -114,28 +119,22 @@ def main():
             viewer.sync()
 
             if data.time - last_render_time >= 1.0 / render_fps:
-                # Debug scene cam (no YOLO, robot visible so we see the arm).
-                rgb_debug.update_scene(data, camera=DEBUG_SCENE_CAM)
-                debug_rgb = rgb_debug.render()
-                debug_bgr = cv2.cvtColor(debug_rgb, cv2.COLOR_RGB2BGR)
-                debug_panel = _label_frame(
-                    debug_bgr, f"scene_camera (debug) | state={fsm.state.name}",
-                    color=(255, 255, 255),
-                )
-
-                # Gripper cam: render live (robot visible) for the user-facing
-                # video so they can see what the camera actually sees. Note
-                # this is purely for display — perception renders this same
-                # camera with scene_option set, separately.
                 rgb_gripper.update_scene(data, camera="gripper_camera")
-                gripper_rgb = rgb_gripper.render()
-                gripper_bgr = cv2.cvtColor(gripper_rgb, cv2.COLOR_RGB2BGR)
-                gripper_panel = _label_frame(
-                    gripper_bgr, "gripper_camera (live, perception input)",
+                ctr = cv2.cvtColor(rgb_gripper.render(), cv2.COLOR_RGB2BGR)
+                ctr = _label_frame(
+                    ctr, f"gripper_center | {fsm.state.name}",
                     color=(0, 255, 255),
                 )
-
-                combined = np.hstack([debug_panel, gripper_panel])
+                panels = [ctr]
+                for i, cam_name in enumerate(GRIPPER_CAM_SIDE_NAMES):
+                    side_rgb_renderers[i].update_scene(data, camera=cam_name)
+                    sb = cv2.cvtColor(side_rgb_renderers[i].render(),
+                                      cv2.COLOR_RGB2BGR)
+                    panels.append(_label_frame(
+                        sb, f"gripper_side_{i} ({cam_name})",
+                        color=(0, 200, 255),
+                    ))
+                combined = np.hstack(panels)
                 cv2.imshow("Grippy Grabber", combined)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break

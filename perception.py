@@ -165,22 +165,26 @@ class PerceptionSystem:
 
         position = pts.mean(axis=0)
 
-        if class_name == "pen":
+        if class_name in ("pen", "book"):
             # Project into XY plane, run PCA on (X, Y) only -> first principal
-            # vector is the pen long axis. Yaw the gripper around world Z so
-            # the jaws close ACROSS that axis (natural pickup for a thin
-            # object lying flat on the table).
+            # vector is the object's long axis.
+            #   - pen:  yaw = long-axis angle, so jaws close ACROSS the long
+            #           axis (jaws span the pen's short width).
+            #   - book: yaw = long-axis angle + 90 deg, so jaws close ALONG
+            #           the long axis -- fingers land on the two SHORT edges
+            #           at the book's center (instead of the long edges).
             xy = pts[:, :2] - pts[:, :2].mean(axis=0)
             try:
                 _, _, vh = np.linalg.svd(xy, full_matrices=False)
                 axis_xy = vh[0]  # principal direction in XY
             except np.linalg.LinAlgError:
                 axis_xy = np.array([1.0, 0.0])
-            yaw = float(np.arctan2(axis_xy[1], axis_xy[0]))
+            long_yaw = float(np.arctan2(axis_xy[1], axis_xy[0]))
+            yaw = long_yaw if class_name == "pen" else long_yaw + np.pi / 2.0
             quat = top_down_quat(yaw)
             principal_axis = np.array([axis_xy[0], axis_xy[1], 0.0])
         else:
-            # cup, book, PuzzleBase, PuzzleCircle, PuzzleSquare, PuzzleTriangle
+            # cup, PuzzleBase, PuzzleCircle, PuzzleSquare, PuzzleTriangle
             quat = top_down_quat(0.0)
             principal_axis = None
 

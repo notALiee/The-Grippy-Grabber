@@ -292,6 +292,8 @@ class PandaController:
             "panda_link4", "panda_link5", "panda_link6", "panda_link7",
             "panda_link8", "panda_hand", "panda_leftfinger", "panda_rightfinger",
             "gripper_camera_link",
+            "gripper_side_cam_ypos",
+            "gripper_side_cam_yneg",
         ]
         pts = []
         for n in names:

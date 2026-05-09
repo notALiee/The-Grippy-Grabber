@@ -1,129 +1,158 @@
 <mujoco>
+
   <compiler angle="radian" meshdir="./mesh" texturedir="./texture" />
-  <visual>    <quality shadowsize="8192" offsamples="8" numslices="64" numstacks="64" />
+
+  <visual>
+    <quality shadowsize="8192" offsamples="8" numslices="64" numstacks="64" />
     <headlight active="1" />
     <rgba haze="0.15 0.25 0.35 1" />
   </visual>
+
   <option timestep="0.001" integrator="Euler" iterations="50" solver="Newton" impratio="5" noslip_iterations="5" tolerance="1e-8" cone="elliptic">
+
     <flag actuation="enable" gravity="enable" warmstart="enable" />
   </option>
+
   <asset>
+
+    
     <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="512" />
+
+    
     <texture name="plane" type="2d" builtin="checker" rgb1=".2 .3 .4" rgb2=".1 0.15 0.2" width="512" height="512" mark="cross" markrgb=".8 .8 .8" />
+
     <material name="plane" reflectance="0.3" texture="plane" texrepeat="1 1" texuniform="true" />
-    <!-Import custom meshes>
+
+    
     <mesh name="table_mesh" file="../../World/Table.stl" scale="0.001 0.001 0.001" />
+
     <material name="table_mat" rgba="0.2 0.6 0.8 1" />
 
-    <!--Puzzle-->
-    <mesh name="pbm" file="../../World/PuzzleBase.stl" scale="0.001 0.001 0.001" />
-    <mesh name="pcm" file="../../World/PuzzleCircle.stl" scale="0.001 0.001 0.001" />
-    <mesh name="psm" file="../../World/PuzzleSquare.stl" scale="0.001 0.001 0.001" />
-    <mesh name="ptm" file="../../World/PuzzleTriangle.stl" scale="0.001 0.001 0.001" />
     
-    <!--Cup-->
-    <mesh name="cup_mesh" file="../../World/Cup.stl" scale ="0.001 0.001 0.001" />
-    <material name="cup_red"   rgba="1 0 0 1" />
-    <material name="cup_green" rgba="0 1 0 1" />
-    <material name="cup_blue"  rgba="0 0 1 1" />
+    <mesh name="pbm" file="../../World/PuzzleBase.stl" scale="0.001 0.001 0.001" />
 
-    <!--Book-->
-    <mesh name="book_mesh" file="../../World/Book.stl" scale ="0.001 0.001 0.001" />
-    <material name="book_red"   rgba="1 0 0 1" />
-    <material name="book_green" rgba="0 1 0 1" />
-    <material name="book_blue"  rgba="0 0 1 1" />
+    <mesh name="pcm" file="../../World/PuzzleCircle.stl" scale="0.001 0.001 0.001" />
 
-    <mesh name="pen_mesh" file="../../World/Pen.stl" scale ="0.001 0.001 0.001" />
-    <material name="pen_mat" rgba="0.1 0.9 0.2 1" />
+    <mesh name="psm" file="../../World/PuzzleSquare.stl" scale="0.001 0.001 0.001" />
+
+    <mesh name="ptm" file="../../World/PuzzleTriangle.stl" scale="0.001 0.001 0.001" />
+
     <material name="pbm_mat" rgba="0.8 0.8 0.8 1" />
 
-</asset>
+    
+    <mesh name="cup_mesh" file="../../World/Cup.stl" scale="0.001 0.001 0.001" />
+
+    
+    <mesh name="book_mesh" file="../../World/Book.stl" scale="0.001 0.001 0.001" />
+
+    
+    <mesh name="pen_mesh" file="../../World/Pen.stl" scale="0.001 0.001 0.001" />
+
+  </asset>
+
   <include file="panda.xml" />
+
   <worldbody>
+
+    
     <body name="table" pos="0 0 0">
       <geom type="mesh" mesh="table_mesh" material="table_mat" />
     </body>
+
+    
     <body name="PuzzleBase" pos="0 -0.25 1">
       <joint type="free" />
-      <geom type="mesh" mesh="pbm" material="pbm_mat"/>
+      <geom type="mesh" mesh="pbm" material="pbm_mat" />
     </body>
+
     <body name="PuzzleCircle" pos="0 -0.3 1">
       <joint type="free" />
-      <geom type="mesh" mesh="pcm" material="pbm_mat"/>
+      <geom type="mesh" mesh="pcm" material="pbm_mat" />
     </body>
+
     <body name="PuzzleSquare" pos="-0.2 -0.3 1">
       <joint type="free" />
-      <geom type="mesh" mesh="psm" material="pbm_mat"/>
+      <geom type="mesh" mesh="psm" material="pbm_mat" />
     </body>
+
     <body name="PuzzleTriangle" pos="0.2 -0.3 1">
       <joint type="free" />
-      <geom type="mesh" mesh="ptm" material="pbm_mat"/>
-    </body>
-    <!--spawn location for Cup 1-->
-    <body name="cup1" pos="0.5 -0.675 0.1">
-        <joint type="free"/>
-        <geom type="mesh" mesh="cup_mesh" material="cup_red" condim="3"/>
-    </body>
-    <!-- Cup 2 -->
-    <body name="cup2" pos="0.5 0.1 0.1">
-        <joint type="free" />
-        <geom type="mesh" mesh="cup_mesh" material="cup_green" condim="3" />
+      <geom type="mesh" mesh="ptm" material="pbm_mat" />
     </body>
 
-    <!-- Cup 3 -->
-    <body name="cup3" pos="0.3 -0.1 0.1"quat="1 0 0 0">
-        <joint type="free" />
-        <geom type="mesh" mesh="cup_mesh" material="cup_blue" condim="3" />
+    
+    <body name="cup1" pos="0.266 -0.205 0.135" quat="1 0 0 0">
+      <joint type="free" />
+      <geom type="mesh" mesh="cup_mesh" rgba="0.008 0.738 0.584 1" condim="3" />
     </body>
 
-    <!-- Book 1 -->
-    <body name="book1" pos="0.1 0 0.1"quat="0.707 0 0 0.707">
-        <joint type="free"/>
-        <geom type="mesh" mesh="book_mesh" material="book_red" condim="3"/>
-    </body>
-    <!-- Book 2 -->
-    <body name="book2" pos="0.5 0 0.4"quat="0 0 1 0">
-        <joint type="free"/>
-        <geom type="mesh" mesh="book_mesh" material="book_green" condim="3"/>
-    </body>
-    <!-- Book 3 -->
-    <body name="book3" pos="0.8 0 0.1">
-        <joint type="free"/>
-        <geom type="mesh" mesh="book_mesh" material="book_blue" condim="3"/>
-    </body>
-    <!--Pen 1-->
-    <body name="pen1" pos="0.9 0 0.1">
-        <joint type="free"/>
-        <geom type="mesh" mesh="pen_mesh" material="pen_mat" condim="3"/>
-    </body>
-    <!--Pen 2-->
-    <body name="pen2" pos="0.5 0 0.5">
-        <joint type="free"/>
-        <geom type="mesh" mesh="pen_mesh" material="pen_mat" condim="3"/>
-    </body>
-    <!--Pen 3-->
-    <body name="pen3" pos="1 0 0.8">
-        <joint type="free"/>
-        <geom type="mesh" mesh="pen_mesh" material="pen_mat" condim="3"/>
-    </body>
- 
-    <!-- Inconvenient walls: thin static box geoms the Cartesian RRT planner
-         has to route around. AABBs hard-mirrored in planner.WORLD_OBSTACLES;
-         keep them in sync if you move these. -->
-    <body name="wall_a" pos="0.40 -0.20 0.05">
-        <geom type="box" size="0.01 0.20 0.05" rgba="0.5 0.3 0.2 1" group="1" contype="1" conaffinity="1"/>
-    </body>
-    <body name="wall_b" pos="0.75 0.05 0.05">
-        <geom type="box" size="0.15 0.01 0.05" rgba="0.5 0.3 0.2 1" group="1" contype="1" conaffinity="1"/>
-    </body>
-    <body name="wall_c" pos="0.20 0.10 0.05">
-        <geom type="box" size="0.01 0.10 0.05" rgba="0.5 0.3 0.2 1" group="1" contype="1" conaffinity="1"/>
+    
+    <body name="cup2" pos="0.533 -0.106 0.103" quat="1 0 0 0">
+      <joint type="free" />
+      <geom type="mesh" mesh="cup_mesh" rgba="0.197 0.226 0.847 1" condim="3" />
     </body>
 
-    <light directional="true" diffuse=".2 .2 .2" specular="0 0 0" pos="0 1 5" dir="0 -1 -1" castshadow="false"/>
+    
+    <body name="cup3" pos="0.735 -0.59 0.115" quat="1 0 0 0">
+      <joint type="free" />
+      <geom type="mesh" mesh="cup_mesh" rgba="0.381 0.135 0.968 1" condim="3" />
+    </body>
+
+    
+    <body name="book1" pos="0.712 -0.295 0.108" quat="1 0 0 0">
+
+      <joint type="free" />
+
+      <geom type="mesh" mesh="book_mesh" rgba="0.351 0.557 0.942 1" condim="3" />
+    </body>
+
+    
+    <body name="book2" pos="0.391 0.299 0.13" quat="1 0 0 0">
+
+      <joint type="free" />
+
+      <geom type="mesh" mesh="book_mesh" rgba="0.843 0.035 0.033 1" condim="3" />
+    </body>
+
+    
+    <body name="book3" pos="0.744 -0.328 0.111" quat="1 0 0 0">
+      <joint type="free" />
+      <geom type="mesh" mesh="book_mesh" rgba="0.023 0.039 0.677 1" condim="3" />
+    </body>
+
+    
+    <body name="pen1" pos="0.654 -0.23 0.128" quat="1 0 0 0">
+      <joint type="free" />
+      <geom type="mesh" mesh="pen_mesh" rgba="0.243 0.36 0.38 1" condim="3" />
+    </body>
+
+    
+    <body name="pen2" pos="0.669 -0.674 0.13" quat="1 0 0 0">
+      <joint type="free" />
+      <geom type="mesh" mesh="pen_mesh" rgba="0.139 0.48 0.431 1" condim="3" />
+    </body>
+
+    
+    <body name="pen3" pos="0.435 -0.419 0.117" quat="1 0 0 0">
+      <joint type="free" />
+      <geom type="mesh" mesh="pen_mesh" rgba="0.08 0.446 0.42 1" condim="3" />
+    </body>
+
+    
+
+
+    
+    <camera name="cam" mode="targetbody" pos="1 1 1" target="panda_hand" />
+
+    
+    <light directional="true" diffuse=".2 .2 .2" specular="0 0 0" pos="0 1 5" dir="0 -1 -1" castshadow="false" />
+
     <light directional="false" diffuse=".8 .8 .8" specular="0.3 0.3 0.3" pos="0 -1 4" dir="0 0 -1" />
+
     <light directional="true" diffuse="0 0 0" specular=".7 .7 .7" pos="0 3 3" dir="0 -3 -3" />
+
+    
     <geom name="floor" pos="0 0 -0.4" group="1" size="0 0 .1" type="plane" material="plane" condim="3" />
-  </worldbody>
+  <body name="wall_a" pos="0.40 -0.20 0.05"><geom type="box" size="0.01 0.20 0.05" rgba="0.5 0.3 0.2 1" group="1" contype="1" conaffinity="1" /></body><body name="wall_b" pos="0.75 0.05 0.05"><geom type="box" size="0.15 0.01 0.05" rgba="0.5 0.3 0.2 1" group="1" contype="1" conaffinity="1" /></body><body name="wall_c" pos="0.20 0.10 0.05"><geom type="box" size="0.01 0.10 0.05" rgba="0.5 0.3 0.2 1" group="1" contype="1" conaffinity="1" /></body></worldbody>
   <equality />
 </mujoco>

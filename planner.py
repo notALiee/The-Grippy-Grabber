@@ -1,29 +1,19 @@
 """
-Cartesian RRT path planner for the Panda end-effector.
+Fast Cartesian RRT-Connect path planner for the Panda end-effector.
 
-Plans collision-free 3D waypoint sequences for `panda_hand` through an
-axis-aligned bounding box (AABB) obstacle field. Used by the FSM in
-`task_manager.py` for every transit move (HOMING, APPROACHING,
-TRANSPORTING, RETREATING, CONFIRMING orbits, EXPLORING sweep) so the arm
-routes around the static wall geoms in `panda_mujoco/world.xml` instead
-of trying to fly straight through them.
+Drop-in replacement for planner.py.
 
-Design notes:
-- Cartesian, not joint-space: simpler, fast enough, and the FSM already
-  has working OS-PD + null-space control once given Cartesian targets.
-- Thin walls use modest XY inflation plus tall Z columns (`OBSTACLE_Z_TOP_PLANNING`)
-  so horizontal chords at SAFE_Z / explore height cannot declare “free sky”
-  while the elbow still strikes the physical wall. XY/Z margins are split so
-  we don’t balloon a 2 cm slab into a slab that swallows the whole workspace.
-- Shortcut-smoothing post-process is critical: raw RRT paths look
-  jittery and produce dozens of micro-trajectories. Greedy shortcut
-  collapses runs of nodes whose direct connection is collision-free,
-  giving the FSM the few clean waypoints it actually needs.
+Key changes versus the plain RRT version:
+- Bidirectional RRT-Connect instead of one-tree RRT, so wall detours are found faster.
+- Safer endpoint handling when the hand starts/ends inside the inflated safety margin.
+- Deterministic shortcut smoothing that aggressively removes ugly jittery waypoints.
+- Path validation helpers so TaskFSM can avoid accidentally using unsafe straight-line fallbacks.
 
-Hand-mirror constants (`WORLD_OBSTACLES`, `WORKSPACE_BOUNDS`) describe
-the world used by the FSM. Keep `WORLD_OBSTACLES` in sync with the
-geoms in `panda_mujoco/world.xml`.
+The planner is still Cartesian: it plans panda_hand XYZ waypoints only. Your OS-PD +
+null-space controller in control.py handles tracking those Cartesian targets.
 """
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
@@ -32,18 +22,11 @@ import numpy as np
 
 
 # ----------------------------------------------------------------------------
-# World description (kept in sync by hand with panda_mujoco/world.xml)
+# World description; keep this in sync with panda_mujoco/world.xml
 # ----------------------------------------------------------------------------
-# XY footprints MUST match wall bodies in panda_mujoco/world.xml (half-extent
-# + center). Z is extended to OBSTACLE_Z_TOP_PLANNING — the real geoms are
-# shorter, but the elbow / lower links sweep well below the wrist during
-# horizontal moves at SAFE_Z (~0.45) and EXPLORING (~0.60). If we only boxed
-# the visible wall height, segment_collides saw "clear sky" at transit Z and
-# returned a straight line straight through the obstacle column while the
-# physical arm still hit the wall.
 OBSTACLE_Z_TOP_PLANNING = 0.72
 
-# AABB format: (x_min, y_min, z_min, x_max, y_max, z_max).
+# AABB format: (x_min, y_min, z_min, x_max, y_max, z_max)
 WORLD_OBSTACLES: List[Tuple[float, float, float, float, float, float]] = [
     # wall_a: pos=(0.40, -0.20, 0.20), size=(0.01, 0.20, 0.20)
     (0.39, -0.40, 0.0, 0.41, 0.00, OBSTACLE_Z_TOP_PLANNING),
@@ -53,25 +36,15 @@ WORLD_OBSTACLES: List[Tuple[float, float, float, float, float, float]] = [
     (0.19, 0.00, 0.0, 0.21, 0.20, OBSTACLE_Z_TOP_PLANNING),
 ]
 
-# Workspace AABB the planner is allowed to sample inside. X/Y derived
-# from the table limits the user gave, with a small inset so we don't
-# sample right at the table edge. Z floor is the grasp floor (so RRT
-# can plan into a near-table approach), Z ceiling leaves clear sky for
-# transit + retreat.
+# (x_min, x_max, y_min, y_max, z_min, z_max)
 WORKSPACE_BOUNDS: Tuple[float, float, float, float, float, float] = (
-    -0.25, 1.10,    # x_min, x_max
-    -0.675, 0.25,   # y_min, y_max
-    0.075, 0.65,    # z_min, z_max
+    -0.25, 1.10,
+    -0.675, 0.25,
+    0.075, 0.65,
 )
 
-# Thin walls need TALL Z columns (so horizontal moves at SAFE_Z / explore
-# height cannot ignore them) but modest XY inflation — isotropic 10 cm+
-# margins turn a 2 cm slab into a continent and strand RRT starts inside
-# inflated geometry.
 XY_SAFETY_MARGIN = 0.04
 Z_SAFETY_MARGIN = 0.06
-
-# Legacy single margin kept for API grep; CartesianRRT uses XY/Z split above.
 DEFAULT_SAFETY_MARGIN = XY_SAFETY_MARGIN
 
 
@@ -80,90 +53,117 @@ DEFAULT_SAFETY_MARGIN = XY_SAFETY_MARGIN
 # ----------------------------------------------------------------------------
 def _inflate(box: Sequence[float], xy_margin: float, z_margin: float
              ) -> Tuple[float, float, float, float, float, float]:
-    """Expand AABB in XY (thin walls stay thin) and Z (extra above wall top)."""
-    return (box[0] - xy_margin, box[1] - xy_margin, box[2] - z_margin,
-            box[3] + xy_margin, box[4] + xy_margin, box[5] + z_margin)
+    return (
+        float(box[0]) - xy_margin,
+        float(box[1]) - xy_margin,
+        float(box[2]) - z_margin,
+        float(box[3]) + xy_margin,
+        float(box[4]) + xy_margin,
+        float(box[5]) + z_margin,
+    )
 
 
 def point_in_aabb(p: np.ndarray, box: Sequence[float]) -> bool:
-    return (box[0] <= p[0] <= box[3]
-            and box[1] <= p[1] <= box[4]
-            and box[2] <= p[2] <= box[5])
+    p = np.asarray(p, dtype=float)
+    return (
+        box[0] <= p[0] <= box[3]
+        and box[1] <= p[1] <= box[4]
+        and box[2] <= p[2] <= box[5]
+    )
 
 
 def segment_hits_aabb(p0: np.ndarray, p1: np.ndarray,
                       box: Sequence[float]) -> bool:
     """
-    Slab method: the segment hits the box iff every axis's entry-time
-    `t_near` is <= every axis's exit-time `t_far`, and the overall
-    intersection interval overlaps [0, 1] (the parameter range of the
-    segment). Treats a segment that only grazes the surface as a hit.
+    Robust slab test for segment-vs-AABB.
+    Returns True even for grazing contact, which is what we want for safety.
     """
+    p0 = np.asarray(p0, dtype=float)
+    p1 = np.asarray(p1, dtype=float)
     d = p1 - p0
+
     t_near = -np.inf
     t_far = np.inf
-    box_min = (box[0], box[1], box[2])
-    box_max = (box[3], box[4], box[5])
-    for i in range(3):
-        if abs(d[i]) < 1e-9:
-            # Parallel to slab i. If origin is outside the slab we miss.
-            if p0[i] < box_min[i] or p0[i] > box_max[i]:
+    bmin = np.array([box[0], box[1], box[2]], dtype=float)
+    bmax = np.array([box[3], box[4], box[5]], dtype=float)
+
+    for axis in range(3):
+        if abs(d[axis]) < 1e-12:
+            if p0[axis] < bmin[axis] or p0[axis] > bmax[axis]:
                 return False
             continue
-        inv = 1.0 / d[i]
-        t1 = (box_min[i] - p0[i]) * inv
-        t2 = (box_max[i] - p0[i]) * inv
+
+        inv_d = 1.0 / d[axis]
+        t1 = (bmin[axis] - p0[axis]) * inv_d
+        t2 = (bmax[axis] - p0[axis]) * inv_d
         if t1 > t2:
             t1, t2 = t2, t1
-        if t1 > t_near:
-            t_near = t1
-        if t2 < t_far:
-            t_far = t2
+
+        t_near = max(t_near, t1)
+        t_far = min(t_far, t2)
         if t_near > t_far:
             return False
+
     return t_far >= 0.0 and t_near <= 1.0
 
 
 def segment_collides(p0: np.ndarray, p1: np.ndarray,
                      obstacles: Sequence[Sequence[float]]) -> bool:
-    for box in obstacles:
-        if segment_hits_aabb(p0, p1, box):
-            return True
-    return False
+    return any(segment_hits_aabb(p0, p1, box) for box in obstacles)
+
+
+def path_collides(path: Sequence[np.ndarray],
+                  obstacles: Sequence[Sequence[float]]) -> bool:
+    if len(path) < 2:
+        return False
+    return any(segment_collides(path[i], path[i + 1], obstacles)
+               for i in range(len(path) - 1))
 
 
 # ----------------------------------------------------------------------------
-# Cartesian RRT
+# RRT-Connect
 # ----------------------------------------------------------------------------
 @dataclass
 class _Node:
     pos: np.ndarray
-    parent: int  # index in tree; -1 for the root
+    parent: int
 
 
 class CartesianRRT:
     """
-    Plain RRT in 3D Cartesian space for the panda_hand. No RRT-Connect /
-    RRT* niceties -- this is an FSM helper, not a research planner. The
-    shortcut-smoothing pass is what makes the output look reasonable.
+    Fast bidirectional Cartesian RRT-Connect in XYZ space.
+
+    plan(start, goal) returns a list of numpy XYZ waypoints:
+        [start, ..., goal]
+    or None if no route is found.
+
+    Notes:
+    - Collision checks use inflated obstacle boxes for internal planning edges.
+    - If start/goal is inside only the inflated margin, not the physical wall,
+      the planner adds a short entry/exit connector and checks that connector
+      against the raw obstacle boxes. This avoids the common bug where the robot
+      starts 1 cm inside the safety margin and RRT refuses to grow at all.
     """
 
     def __init__(self,
                  bounds: Sequence[float] = WORKSPACE_BOUNDS,
                  obstacles: Sequence[Sequence[float]] = WORLD_OBSTACLES,
-                 step_size: float = 0.05,
-                 goal_bias: float = 0.20,
+                 step_size: float = 0.055,
+                 goal_bias: float = 0.12,
                  goal_tol: float = 0.035,
-                 max_iters: int = 4500,
+                 max_iters: int = 2500,
                  xy_margin: float = XY_SAFETY_MARGIN,
                  z_margin: float = Z_SAFETY_MARGIN,
-                 seed: Optional[int] = 0):
-        self.bounds = tuple(bounds)
+                 smooth_passes: int = 80,
+                 seed: Optional[int] = None):
+        self.bounds = tuple(float(v) for v in bounds)
+        self.raw_obstacles = [tuple(float(x) for x in b) for b in obstacles]
         self.obstacles = [_inflate(b, xy_margin, z_margin) for b in obstacles]
         self.step_size = float(step_size)
-        self.goal_bias = float(goal_bias)
+        self.goal_bias = float(np.clip(goal_bias, 0.0, 1.0))
         self.goal_tol = float(goal_tol)
         self.max_iters = int(max_iters)
+        self.smooth_passes = int(smooth_passes)
         self._rng = np.random.default_rng(seed)
 
     # ------------------------------------------------------------------
@@ -171,83 +171,169 @@ class CartesianRRT:
     # ------------------------------------------------------------------
     def plan(self, start_xyz: np.ndarray, goal_xyz: np.ndarray
              ) -> Optional[List[np.ndarray]]:
-        """
-        Returns a list of 3D waypoints from `start` to `goal` (inclusive,
-        with `start` first and `goal` last) that's collision-free under
-        the inflated AABB obstacles. None if no path was found within
-        `max_iters`.
+        raw_start = self._checked_point(start_xyz, "start")
+        raw_goal = self._checked_point(goal_xyz, "goal")
 
-        Trivial-path fast path: if the straight segment is already
-        collision-free, return [start, goal] without any tree growth.
-        """
-        start = np.asarray(start_xyz, dtype=float).copy()
-        goal = np.asarray(goal_xyz, dtype=float).copy()
+        start = self._clamp_to_bounds(raw_start)
+        goal = self._clamp_to_bounds(raw_goal)
 
-        # Clamp endpoints into bounds (callers occasionally hand us a
-        # goal outside the workspace box, e.g. drop zones near the
-        # edge). Clamping is safer than refusing to plan.
-        start = self._clamp_to_bounds(start)
-        goal = self._clamp_to_bounds(goal)
+        # If an endpoint is inside only the inflated margin, create a nearby
+        # planning point outside the margin. Keep the original endpoint as the
+        # actual first/last waypoint so TaskFSM still starts and ends correctly.
+        start_plan = self._escape_inflated_if_needed(start, toward=goal)
+        goal_plan = self._escape_inflated_if_needed(goal, toward=start)
 
-        # If the start happens to be inside an inflated obstacle (e.g.
-        # we started a leg too close to a wall after a previous
-        # collision recovery), nudge it toward the goal until it's
-        # free, otherwise the very first edge collides with itself.
-        start = self._escape_obstacle(start, goal)
+        if start_plan is None or goal_plan is None:
+            return None
 
-        # Quick deterministic shortcut: try connecting start to goal directly
-        if not segment_collides(start, goal, self.obstacles):
-            return [start, goal]
+        # Connector segments are allowed to pass through the *inflated* margin,
+        # but never through the physical/raw obstacle.
+        prefix: List[np.ndarray] = [start]
+        if not self._same_point(start, start_plan):
+            if segment_collides(start, start_plan, self.raw_obstacles):
+                return None
+            prefix.append(start_plan)
 
-        # Since it's for a video and we know the 3 walls, we can hardcode a safe
-        # 'middle' waypoint that usually routes around them at safe_z if direct fails.
-        safe_waypoint = np.array([0.5, -0.1, max(start[2], goal[2])])
-        
-        path = [start]
-        if not segment_collides(start, safe_waypoint, self.obstacles) and not segment_collides(safe_waypoint, goal, self.obstacles):
-            path.append(safe_waypoint)
-        else:
-            # Add an extra safe waypoint point
-            w1 = np.array([0.3, -0.4, max(start[2], goal[2])])
-            w2 = np.array([0.8, -0.3, max(start[2], goal[2])])
-            if np.linalg.norm(start[:2] - w1[:2]) < np.linalg.norm(start[:2] - w2[:2]):
-                path.extend([w1, w2])
+        suffix: List[np.ndarray] = []
+        if not self._same_point(goal_plan, goal):
+            if segment_collides(goal_plan, goal, self.raw_obstacles):
+                return None
+            suffix.append(goal)
+
+        # Fast path when the repaired planning endpoints can see each other.
+        if not segment_collides(start_plan, goal_plan, self.obstacles):
+            return self._dedupe_path(prefix + [goal_plan] + suffix)
+
+        core = self._rrt_connect(start_plan, goal_plan)
+        if core is None:
+            core = self._deterministic_fallback(start_plan, goal_plan)
+        if core is None:
+            return None
+
+        core = self._shortcut_smooth(core)
+        full_path = self._dedupe_path(prefix + core[1:-1] + [goal_plan] + suffix)
+
+        # Internal/core segments should be inflated-safe. Endpoint connector
+        # segments may be only raw-safe when the endpoint is in the safety margin.
+        if not self._path_is_acceptable(full_path, start, goal):
+            return None
+        return full_path
+
+    def validate_path(self, path: Sequence[np.ndarray]) -> bool:
+        """Strict validation against inflated planning obstacles."""
+        if len(path) < 2:
+            return True
+        if any(self._point_in_any(p, self.raw_obstacles) for p in path):
+            return False
+        return not path_collides(path, self.obstacles)
+
+    # ------------------------------------------------------------------
+    # RRT-Connect internals
+    # ------------------------------------------------------------------
+    def _rrt_connect(self, start: np.ndarray, goal: np.ndarray
+                     ) -> Optional[List[np.ndarray]]:
+        if self._point_in_any(start, self.obstacles):
+            return None
+        if self._point_in_any(goal, self.obstacles):
+            return None
+
+        tree_start: List[_Node] = [_Node(start.copy(), -1)]
+        tree_goal: List[_Node] = [_Node(goal.copy(), -1)]
+
+        flipped = False
+        for k in range(self.max_iters):
+            if self._rng.random() < self.goal_bias:
+                sample = goal if not flipped else start
             else:
-                path.extend([w2, w1])
+                sample = self._sample_free()
 
-        path.append(goal)
-        return self._shortcut_smooth(path)
+            tree_a = tree_goal if flipped else tree_start
+            tree_b = tree_start if flipped else tree_goal
+
+            status_a, idx_a = self._extend(tree_a, sample)
+            if status_a == "trapped":
+                flipped = not flipped
+                continue
+
+            new_pos = tree_a[idx_a].pos
+            status_b, idx_b = self._connect(tree_b, new_pos)
+            if status_b == "reached":
+                if not flipped:
+                    left = self._trace(tree_start, idx_a)          # start -> meet
+                    right = self._trace(tree_goal, idx_b)          # goal -> meet
+                else:
+                    left = self._trace(tree_start, idx_b)          # start -> meet
+                    right = self._trace(tree_goal, idx_a)          # goal -> meet
+                return self._dedupe_path(left + list(reversed(right)))
+
+            # Alternate which side grows. This keeps the trees balanced.
+            flipped = not flipped
+
+        return None
+
+    def _extend(self, tree: List[_Node], target: np.ndarray) -> Tuple[str, int]:
+        nearest_idx = self._nearest(tree, target)
+        nearest = tree[nearest_idx].pos
+        new_pos = self._steer(nearest, target)
+
+        if self._point_in_any(new_pos, self.obstacles):
+            return "trapped", nearest_idx
+        if segment_collides(nearest, new_pos, self.obstacles):
+            return "trapped", nearest_idx
+
+        tree.append(_Node(new_pos, nearest_idx))
+        new_idx = len(tree) - 1
+
+        if np.linalg.norm(new_pos - target) <= self.goal_tol:
+            return "reached", new_idx
+        return "advanced", new_idx
+
+    def _connect(self, tree: List[_Node], target: np.ndarray) -> Tuple[str, int]:
+        last_status = "advanced"
+        last_idx = self._nearest(tree, target)
+
+        # Hard cap prevents infinite loops if target is almost reachable but
+        # numerical tolerances keep the status at advanced forever.
+        for _ in range(128):
+            status, idx = self._extend(tree, target)
+            if status == "trapped":
+                return last_status, last_idx
+            last_status, last_idx = status, idx
+            if status == "reached":
+                return status, idx
+        return last_status, last_idx
+
+    def _trace(self, tree: List[_Node], idx: int) -> List[np.ndarray]:
+        out: List[np.ndarray] = []
+        while idx >= 0:
+            out.append(tree[idx].pos.copy())
+            idx = tree[idx].parent
+        out.reverse()
+        return out
 
     # ------------------------------------------------------------------
-    # Internals
+    # Sampling / geometry helpers
     # ------------------------------------------------------------------
+    def _checked_point(self, p: np.ndarray, name: str) -> np.ndarray:
+        p = np.asarray(p, dtype=float).reshape(3).copy()
+        if not np.all(np.isfinite(p)):
+            raise ValueError(f"{name} contains NaN/Inf: {p}")
+        return p
+
     def _sample_free(self) -> np.ndarray:
-        # Try a handful of random samples; bail with a free-but-near-goal
-        # fallback if the workspace is very crowded.
-        for _ in range(32):
-            p = self._rng.uniform(
-                low=(self.bounds[0], self.bounds[2], self.bounds[4]),
-                high=(self.bounds[1], self.bounds[3], self.bounds[5]),
-            )
-            if not any(point_in_aabb(p, b) for b in self.obstacles):
+        low = np.array([self.bounds[0], self.bounds[2], self.bounds[4]], dtype=float)
+        high = np.array([self.bounds[1], self.bounds[3], self.bounds[5]], dtype=float)
+        for _ in range(64):
+            p = self._rng.uniform(low=low, high=high)
+            if not self._point_in_any(p, self.obstacles):
                 return p
-        # Pathological case: just return uniform sample, edge check will
-        # reject any colliding edge anyway.
-        return self._rng.uniform(
-            low=(self.bounds[0], self.bounds[2], self.bounds[4]),
-            high=(self.bounds[1], self.bounds[3], self.bounds[5]),
-        )
+        return self._rng.uniform(low=low, high=high)
 
     def _nearest(self, tree: List[_Node], q: np.ndarray) -> int:
-        # Linear scan -- fine for a few-thousand-node tree at 3D.
-        best = 0
-        best_d = float("inf")
-        for i, node in enumerate(tree):
-            d = float(np.linalg.norm(node.pos - q))
-            if d < best_d:
-                best_d = d
-                best = i
-        return best
+        # Vectorized nearest is much faster than looping in Python once the
+        # trees reach hundreds/thousands of nodes.
+        pts = np.array([node.pos for node in tree])
+        return int(np.argmin(np.sum((pts - q) ** 2, axis=1)))
 
     def _steer(self, frm: np.ndarray, to: np.ndarray) -> np.ndarray:
         delta = to - frm
@@ -256,65 +342,199 @@ class CartesianRRT:
             return to.copy()
         return frm + delta * (self.step_size / dist)
 
-    def _backtrace(self, tree: List[_Node], leaf_idx: int) -> List[np.ndarray]:
-        path: List[np.ndarray] = []
-        i = leaf_idx
-        while i >= 0:
-            path.append(tree[i].pos.copy())
-            i = tree[i].parent
-        path.reverse()
-        return path
-
-    def _shortcut_smooth(self, path: List[np.ndarray],
-                         max_passes: int = 4) -> List[np.ndarray]:
-        """
-        Greedy shortcut: repeatedly walk the path and drop intermediate
-        waypoints whose neighbors can be connected directly without
-        hitting an obstacle. Converges quickly; 4 passes is plenty.
-        """
-        if len(path) <= 2:
-            return path
-        out = [p.copy() for p in path]
-        for _ in range(max_passes):
-            i = 0
-            changed = False
-            while i + 2 < len(out):
-                if not segment_collides(out[i], out[i + 2], self.obstacles):
-                    del out[i + 1]
-                    changed = True
-                else:
-                    i += 1
-            if not changed:
-                break
-        return out
-
     def _clamp_to_bounds(self, p: np.ndarray) -> np.ndarray:
-        out = p.copy()
-        out[0] = float(np.clip(out[0], self.bounds[0], self.bounds[1]))
-        out[1] = float(np.clip(out[1], self.bounds[2], self.bounds[3]))
-        out[2] = float(np.clip(out[2], self.bounds[4], self.bounds[5]))
+        return np.array([
+            np.clip(p[0], self.bounds[0], self.bounds[1]),
+            np.clip(p[1], self.bounds[2], self.bounds[3]),
+            np.clip(p[2], self.bounds[4], self.bounds[5]),
+        ], dtype=float)
+
+    def _point_in_any(self, p: np.ndarray,
+                      obstacles: Sequence[Sequence[float]]) -> bool:
+        return any(point_in_aabb(p, b) for b in obstacles)
+
+    def _escape_inflated_if_needed(self, p: np.ndarray,
+                                   toward: np.ndarray) -> Optional[np.ndarray]:
+        """
+        If p is inside an inflated obstacle, push it to the nearest free face.
+        This is for safety-margin issues, not for planning through real walls.
+        """
+        p = self._clamp_to_bounds(p)
+        if not self._point_in_any(p, self.obstacles):
+            return p
+
+        # If it is inside the raw physical obstacle, still try to escape. This
+        # can happen after a recovery, but we will reject connector segments
+        # that cut through raw geometry.
+        cand = p.copy()
+        eps = 2e-3
+        for _ in range(8):
+            containing = [b for b in self.obstacles if point_in_aabb(cand, b)]
+            if not containing:
+                return self._clamp_to_bounds(cand)
+
+            # Push out of the nearest face of the tightest containing box.
+            best_move = None
+            best_dist = float("inf")
+            for b in containing:
+                mins = np.array([b[0], b[1], b[2]], dtype=float)
+                maxs = np.array([b[3], b[4], b[5]], dtype=float)
+                for axis in range(3):
+                    lower_dist = abs(cand[axis] - mins[axis])
+                    upper_dist = abs(maxs[axis] - cand[axis])
+
+                    # Tie-break: prefer moving in the general direction of
+                    # `toward` so the first connector does not U-turn hard.
+                    sign_hint = np.sign(toward[axis] - cand[axis])
+                    if lower_dist < best_dist:
+                        best_dist = lower_dist
+                        best_move = (axis, mins[axis] - eps)
+                    if upper_dist < best_dist or (
+                        abs(upper_dist - best_dist) < 1e-9 and sign_hint >= 0
+                    ):
+                        best_dist = upper_dist
+                        best_move = (axis, maxs[axis] + eps)
+
+            if best_move is None:
+                break
+            axis, value = best_move
+            cand[axis] = value
+            cand = self._clamp_to_bounds(cand)
+
+        if not self._point_in_any(cand, self.obstacles):
+            return cand
+
+        # Last resort: small radial samples around the endpoint.
+        directions = np.array([
+            [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1],
+            [1, 1, 0], [1, -1, 0], [-1, 1, 0], [-1, -1, 0],
+        ], dtype=float)
+        directions /= np.linalg.norm(directions, axis=1, keepdims=True)
+        for radius in np.linspace(0.01, 0.16, 16):
+            for d in directions:
+                cand = self._clamp_to_bounds(p + d * radius)
+                if not self._point_in_any(cand, self.obstacles):
+                    return cand
+        return None
+
+    # ------------------------------------------------------------------
+    # Smoothing / fallback / validation
+    # ------------------------------------------------------------------
+    def _shortcut_smooth(self, path: List[np.ndarray]) -> List[np.ndarray]:
+        if len(path) <= 2:
+            return self._dedupe_path(path)
+
+        path = self._dedupe_path(path)
+
+        # Greedy farthest-visible shortcut pass.
+        changed = True
+        while changed:
+            changed = False
+            out = [path[0]]
+            i = 0
+            while i < len(path) - 1:
+                j_best = i + 1
+                for j in range(len(path) - 1, i, -1):
+                    if not segment_collides(path[i], path[j], self.obstacles):
+                        j_best = j
+                        break
+                out.append(path[j_best])
+                if j_best > i + 1:
+                    changed = True
+                i = j_best
+            path = self._dedupe_path(out)
+
+        # Random shortcut attempts catch cases the greedy pass misses.
+        for _ in range(self.smooth_passes):
+            if len(path) <= 2:
+                break
+            i, j = sorted(self._rng.choice(len(path), size=2, replace=False))
+            if j <= i + 1:
+                continue
+            if not segment_collides(path[i], path[j], self.obstacles):
+                path = path[:i + 1] + path[j:]
+
+        return self._dedupe_path(path)
+
+    def _deterministic_fallback(self, start: np.ndarray, goal: np.ndarray
+                                ) -> Optional[List[np.ndarray]]:
+        """
+        Cheap non-random backup: try Manhattan-style doglegs around wall columns.
+        This is not a replacement for RRT; it just avoids failing on simple maps.
+        """
+        z_values = [start[2], goal[2], max(start[2], goal[2]), self.bounds[5] - 0.01]
+        x_lanes = [self.bounds[0] + 0.03, self.bounds[1] - 0.03, start[0], goal[0]]
+        y_lanes = [self.bounds[2] + 0.03, self.bounds[3] - 0.03, start[1], goal[1]]
+
+        candidates: List[List[np.ndarray]] = []
+        for z in z_values:
+            z = float(np.clip(z, self.bounds[4], self.bounds[5]))
+            s_up = np.array([start[0], start[1], z])
+            g_up = np.array([goal[0], goal[1], z])
+            candidates.append([start, s_up, g_up, goal])
+            for xm in x_lanes:
+                xm = float(np.clip(xm, self.bounds[0], self.bounds[1]))
+                candidates.append([
+                    start, s_up,
+                    np.array([xm, start[1], z]),
+                    np.array([xm, goal[1], z]),
+                    g_up, goal,
+                ])
+            for ym in y_lanes:
+                ym = float(np.clip(ym, self.bounds[2], self.bounds[3]))
+                candidates.append([
+                    start, s_up,
+                    np.array([start[0], ym, z]),
+                    np.array([goal[0], ym, z]),
+                    g_up, goal,
+                ])
+
+        best: Optional[List[np.ndarray]] = None
+        best_len = float("inf")
+        for cand in candidates:
+            cand = self._dedupe_path([self._clamp_to_bounds(p) for p in cand])
+            if any(self._point_in_any(p, self.obstacles) for p in cand):
+                continue
+            if path_collides(cand, self.obstacles):
+                continue
+            length = self._path_length(cand)
+            if length < best_len:
+                best_len = length
+                best = cand
+        return best
+
+    def _path_is_acceptable(self, path: List[np.ndarray],
+                            start: np.ndarray, goal: np.ndarray) -> bool:
+        if len(path) < 2:
+            return False
+
+        # Never allow waypoints inside the physical walls.
+        if any(self._point_in_any(p, self.raw_obstacles) for p in path):
+            return False
+
+        # Internal edges must be inflated-safe. First/last connector may be
+        # only raw-safe if the actual endpoint is inside the inflated margin.
+        for i in range(len(path) - 1):
+            a, b = path[i], path[i + 1]
+            is_start_connector = i == 0 and self._same_point(a, start)
+            is_goal_connector = i == len(path) - 2 and self._same_point(b, goal)
+            obstacles = self.raw_obstacles if (is_start_connector or is_goal_connector) else self.obstacles
+            if segment_collides(a, b, obstacles):
+                return False
+        return True
+
+    def _dedupe_path(self, path: Sequence[np.ndarray], eps: float = 1e-7
+                     ) -> List[np.ndarray]:
+        out: List[np.ndarray] = []
+        for p in path:
+            p = np.asarray(p, dtype=float).copy()
+            if not out or np.linalg.norm(p - out[-1]) > eps:
+                out.append(p)
         return out
 
-    def _escape_obstacle(self, start: np.ndarray, goal: np.ndarray
-                         ) -> np.ndarray:
-        """
-        If the start point happens to lie inside an inflated obstacle
-        (or inside the safety margin around one), step it toward the
-        goal in small increments until it's free. Without this the
-        very first sampled edge collides with the obstacle the start
-        is buried in and RRT can't grow.
-        """
-        if not any(point_in_aabb(start, b) for b in self.obstacles):
-            return start
-        delta = goal - start
-        dist = float(np.linalg.norm(delta))
-        if dist < 1e-6:
-            return start
-        direction = delta / dist
-        step = max(self.step_size * 0.5, 0.02)
-        for k in range(1, 21):
-            cand = start + direction * (step * k)
-            if not any(point_in_aabb(cand, b) for b in self.obstacles):
-                return cand
-        # Couldn't find a free spot toward the goal; just return original.
-        return start
+    def _path_length(self, path: Sequence[np.ndarray]) -> float:
+        return float(sum(np.linalg.norm(path[i + 1] - path[i])
+                         for i in range(len(path) - 1)))
+
+    def _same_point(self, a: np.ndarray, b: np.ndarray, eps: float = 1e-7) -> bool:
+        return float(np.linalg.norm(np.asarray(a) - np.asarray(b))) <= eps

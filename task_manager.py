@@ -112,7 +112,7 @@ EXPLORE_WAYPOINTS = [
 ]
 EXPLORE_TRAVEL_SPEED = 0.12           # m/s, slow + smooth so YOLO has time + arm doesn't lurch
 EXPLORE_PERCEIVE_INTERVAL = 0.30      # s, sim time between gripper-cam perception runs
-EXPLORE_MIN_SCORE = 0.80              # min YOLO confidence to even consider a target
+EXPLORE_MIN_SCORE = 0.45              # min YOLO confidence to even consider a target
 EXPLORE_MAX_LAPS = 2                  # full passes with zero detections -> DONE
 EXPLORE_GRIPPER_OPENING = 0.04        # m, partial-open during sweep
 # Five-view perception (center + 4 horizontal cams): merge radius wider
@@ -128,7 +128,7 @@ MULTIVIEW_MERGE_RADIUS = 0.062
 # CONFIRM_MAX_XY_DRIFT of the original do we proceed. The averaged XY
 # from the confirming hits is also a much better grasp center than any
 # single-view detection.
-CONFIRM_MIN_SCORE = 0.80              # min YOLO confidence per confirmation view
+CONFIRM_MIN_SCORE = 0.45              # min YOLO confidence per confirmation view
 CONFIRM_REQUIRED_HITS = 2             # at least N matching detections out of N_VIEWPOINTS
 CONFIRM_HOVER_Z = 0.35                # m, panda_hand z while orbiting (slightly above PRE_GRASP_HOVER_Z so the whole object fits in frame even after the XY offset)
 CONFIRM_SETTLE_TIME = 0.4             # s, wait at each viewpoint for the camera to stabilize before snapping

@@ -100,7 +100,7 @@ MIN_TRAJ_DURATION = 1.0               # s, never let trajectories get instantane
 STATE_TIMEOUT = 20.0                  # s, hard cap per state (raised for slower motion)
 
 # ---- Active exploration (gripper-mounted cameras) ---------------------------
-# Perception uses the center + two side-facing RGB-D cameras on the hand.
+# Perception uses the center + four lateral RGB-D cameras on the hand (±Y, ±X).
 # The arm continuously sweeps EXPLORE_WAYPOINTS while running merged
 # perception every EXPLORE_PERCEIVE_INTERVAL seconds. The FIRST high-confidence detection
 # wins -- we abort the sweep, go grasp it, then come back to exploring.
@@ -115,9 +115,9 @@ EXPLORE_PERCEIVE_INTERVAL = 0.30      # s, sim time between gripper-cam percepti
 EXPLORE_MIN_SCORE = 0.80              # min YOLO confidence to even consider a target
 EXPLORE_MAX_LAPS = 2                  # full passes with zero detections -> DONE
 EXPLORE_GRIPPER_OPENING = 0.04        # m, partial-open during sweep
-# Tri-camera perception (center + 2 side gripper cams): merge radius a
-# bit wider than single-view because lateral cameras introduce parallax.
-MULTIVIEW_MERGE_RADIUS = 0.055
+# Five-view perception (center + 4 horizontal cams): merge radius wider
+# than single-view because lateral cameras introduce parallax.
+MULTIVIEW_MERGE_RADIUS = 0.062
 
 # ---- Multi-view confirmation ----------------------------------------------
 # When EXPLORING spots a high-confidence candidate we don't immediately
@@ -215,13 +215,20 @@ class Trajectory:
 
 # Names must match <camera name="..."/> in panda.xml.
 GRIPPER_CAM_CENTER = "gripper_camera"
-GRIPPER_CAM_SIDE_NAMES = ("gripper_depth_side_ypos", "gripper_depth_side_yneg")
+# Lateral RGB-D ring on the hand: ±Y (sides) + ±X (front/back in hand frame).
+GRIPPER_CAM_RING_NAMES = (
+    "gripper_depth_side_ypos",
+    "gripper_depth_side_yneg",
+    "gripper_depth_side_xpos",
+    "gripper_depth_side_xneg",
+)
+GRIPPER_CAM_SIDE_NAMES = GRIPPER_CAM_RING_NAMES  # backwards-compat alias
 
 
 # ----------------------------------------------------------------------------
 # Renderer bundle handed to the FSM by main.py
 #
-# Center gripper cam + two side-facing RGB-D cams on the hand. All use the
+# Center gripper cam + four lateral RGB-D cams (hand ±Y, ±X). All use the
 # same scene_option (robot hidden) during perception so fingers don’t
 # corrupt depth.
 # ----------------------------------------------------------------------------
@@ -230,9 +237,9 @@ class _SceneRenderers:
     gripper_rgb_renderer: object
     gripper_depth_renderer: object
     gripper_intrinsics: dict
-    side_rgb_renderers: Tuple[object, object]
-    side_depth_renderers: Tuple[object, object]
-    side_intrinsics: Tuple[dict, dict]
+    side_rgb_renderers: Tuple[object, ...]
+    side_depth_renderers: Tuple[object, ...]
+    side_intrinsics: Tuple[dict, ...]
     scene_option: object = None       # MjvOption hiding robot (group=2) for perception
 
 
@@ -392,10 +399,10 @@ def _capture_gripper_view(data, renderers: _SceneRenderers,
     )
 
 
-def _capture_tri_gripper_views(data, renderers: _SceneRenderers) -> List[CameraView]:
+def _capture_ring_gripper_views(data, renderers: _SceneRenderers) -> List[CameraView]:
     """
-    Center + two side-facing gripper cameras. Feeds perception.scan_multi
-    so YOLO/depth fuse across views (less blind volume beside the fingers).
+    Downward center cam + four horizontal views (±Y and ±X in hand frame).
+    Fed to perception.scan_multi for all-round gripper-fixed vision.
     """
     views: List[CameraView] = [
         _capture_single_camera_view(
@@ -407,16 +414,17 @@ def _capture_tri_gripper_views(data, renderers: _SceneRenderers) -> List[CameraV
             "gripper_center",
         ),
     ]
-    for i, cam_name in enumerate(GRIPPER_CAM_SIDE_NAMES):
+    for i, cam_name in enumerate(GRIPPER_CAM_RING_NAMES):
         views.append(_capture_single_camera_view(
             data, renderers,
             renderers.side_rgb_renderers[i],
             renderers.side_depth_renderers[i],
             cam_name,
             renderers.side_intrinsics[i],
-            f"gripper_side_{i}",
+            f"gripper_ring_{i}",
         ))
     return views
+
 
 
 # ----------------------------------------------------------------------------
@@ -700,7 +708,7 @@ class TaskFSM:
     def _look_for_target(self, data, perception, robot, renderers,
                          t_sim: float = 0.0) -> Optional[ObjectPose]:
         """
-        Capture gripper RGB-D from the center + two side-facing cameras,
+        Capture gripper RGB-D from the center + four lateral cameras,
         run YOLO + pose per view and merge via scan_multi (handles occlusion
         where the top-down cam is blind).
         Also rejects targets that are physically unsafe to grasp:
@@ -710,7 +718,7 @@ class TaskFSM:
           - off-table z range
         """
         view = _capture_gripper_view(data, renderers, name="explore")
-        views = _capture_tri_gripper_views(data, renderers)
+        views = _capture_ring_gripper_views(data, renderers)
         poses = perception.scan_multi(
             views, min_points=20, min_score=EXPLORE_MIN_SCORE,
             merge_radius=MULTIVIEW_MERGE_RADIUS,
@@ -870,7 +878,7 @@ class TaskFSM:
             elif (t_sim - self._confirm_arrived_t) >= CONFIRM_SETTLE_TIME:
                 # Take a snapshot and try to find the same class within
                 # CONFIRM_MAX_XY_DRIFT.
-                views = _capture_tri_gripper_views(data, renderers)
+                views = _capture_ring_gripper_views(data, renderers)
                 poses = perception.scan_multi(
                     views, min_points=20,
                     min_score=CONFIRM_MIN_SCORE,

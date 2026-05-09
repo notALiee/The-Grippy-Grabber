@@ -294,6 +294,8 @@ class PandaController:
             "gripper_camera_link",
             "gripper_side_cam_ypos",
             "gripper_side_cam_yneg",
+            "gripper_side_cam_xpos",
+            "gripper_side_cam_xneg",
         ]
         pts = []
         for n in names:

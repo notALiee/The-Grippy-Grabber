@@ -7,7 +7,7 @@ import numpy as np
 
 from control import PandaController
 from perception import PerceptionSystem, get_intrinsics
-from task_manager import GRIPPER_CAM_SIDE_NAMES, TaskFSM, _SceneRenderers
+from task_manager import GRIPPER_CAM_RING_NAMES, TaskFSM, _SceneRenderers
 
 
 def _make_scene_option(model):
@@ -44,9 +44,8 @@ def main():
 
     width, height = 640, 480
 
-    # Gripper-mounted perception: center (top-down) + two side-facing RGB-D
-    # cameras. The FSM merges detections across all three (task_manager
-    # scan_multi).
+    # Gripper-mounted perception: center (top-down) + four horizontal RGB-D
+    # cams (±Y and ±X on the hand). The FSM merges all five via scan_multi.
     rgb_gripper = mujoco.Renderer(model, height=height, width=width)
     depth_gripper = mujoco.Renderer(model, height=height, width=width)
     depth_gripper.enable_depth_rendering()
@@ -55,7 +54,7 @@ def main():
     side_rgb_renderers = []
     side_depth_renderers = []
     side_intrinsics_list = []
-    for cam_name in GRIPPER_CAM_SIDE_NAMES:
+    for cam_name in GRIPPER_CAM_RING_NAMES:
         r_side = mujoco.Renderer(model, height=height, width=width)
         d_side = mujoco.Renderer(model, height=height, width=width)
         d_side.enable_depth_rendering()
@@ -70,9 +69,9 @@ def main():
         gripper_rgb_renderer=rgb_gripper,
         gripper_depth_renderer=depth_gripper,
         gripper_intrinsics=gripper_intrinsics,
-        side_rgb_renderers=(side_rgb_renderers[0], side_rgb_renderers[1]),
-        side_depth_renderers=(side_depth_renderers[0], side_depth_renderers[1]),
-        side_intrinsics=(side_intrinsics_list[0], side_intrinsics_list[1]),
+        side_rgb_renderers=tuple(side_rgb_renderers),
+        side_depth_renderers=tuple(side_depth_renderers),
+        side_intrinsics=tuple(side_intrinsics_list),
         scene_option=scene_option,
     )
 
@@ -80,8 +79,8 @@ def main():
     print("Tip: Expand the right side panel in the viewer to change the camera view.")
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    # Recording: only gripper-mounted RGB (center + two side cams). No world cameras.
-    out = cv2.VideoWriter("output.mp4", fourcc, 10.0, (width * 3, height))
+    # Recording: center + four lateral gripper RGB panels (no world cameras).
+    out = cv2.VideoWriter("output.mp4", fourcc, 10.0, (width * 5, height))
 
     with mujoco.viewer.launch_passive(model, data) as viewer:
         last_render_time = data.time
@@ -126,12 +125,12 @@ def main():
                     color=(0, 255, 255),
                 )
                 panels = [ctr]
-                for i, cam_name in enumerate(GRIPPER_CAM_SIDE_NAMES):
+                for i, cam_name in enumerate(GRIPPER_CAM_RING_NAMES):
                     side_rgb_renderers[i].update_scene(data, camera=cam_name)
                     sb = cv2.cvtColor(side_rgb_renderers[i].render(),
                                       cv2.COLOR_RGB2BGR)
                     panels.append(_label_frame(
-                        sb, f"gripper_side_{i} ({cam_name})",
+                        sb, f"ring_{i} ({cam_name})",
                         color=(0, 200, 255),
                     ))
                 combined = np.hstack(panels)

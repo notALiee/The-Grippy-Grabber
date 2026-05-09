@@ -97,7 +97,7 @@
         <geom type="mesh" mesh="pen_mesh" material="pen_mat" condim="3"/>
     </body>
     <!--Pen 2-->
-    <body name="pen2" pos="0.3 0 0.5">
+    <body name="pen2" pos="0.5 0 0.5">
         <joint type="free"/>
         <geom type="mesh" mesh="pen_mesh" material="pen_mat" condim="3"/>
     </body>
@@ -119,6 +119,10 @@
       <joint type="free" />
     </body>
     <camera name="cam" mode="targetbody" pos="1 1 1" target="panda_hand" />
+    <!-- Debug-only static camera. NOT used for perception (gripper_camera
+         is the sole perception input). Kept for the side-by-side debug
+         video pane so the user can see the arm in action. -->
+    <camera name="scene_camera" pos="0.4 -0.1 1.6" xyaxes="1 0 0 0 1 0" fovy="75" />
     <light directional="true" diffuse=".2 .2 .2" specular="0 0 0" pos="0 1 5" dir="0 -1 -1" castshadow="false"/>
     <light directional="false" diffuse=".8 .8 .8" specular="0.3 0.3 0.3" pos="0 -1 4" dir="0 0 -1" />
     <light directional="true" diffuse="0 0 0" specular=".7 .7 .7" pos="0 3 3" dir="0 -3 -3" />

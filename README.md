@@ -1,3 +1,5 @@
+# Demonstration videos: https://drive.google.com/file/d/1nNOu5XfV_mb58RxHOcuBKrsmKKrJqh7u/view?usp=sharing (link to demonstration videos)
+
 # The Grippy Grabber
 
 The Grippy Grabber is a simulated robotic pick-and-place system using the Franka Emika Panda arm. It utilizes MuJoCo for physics simulation, IKFast for inverse kinematics, and YOLO for object detection and pose estimation. The system orchestrates obstacle avoidance, grasping, and placement using a finite state machine.

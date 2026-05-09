@@ -401,8 +401,9 @@ def _capture_gripper_view(data, renderers: _SceneRenderers,
 
 def _capture_ring_gripper_views(data, renderers: _SceneRenderers) -> List[CameraView]:
     """
-    Downward center cam + four horizontal views (±Y and ±X in hand frame).
-    Fed to perception.scan_multi for all-round gripper-fixed vision.
+    Downward center cam only. The user explicitly requested to NOT use the 
+    4 lateral cameras for object detection, so we only return the center view 
+    for scan_multi to run YOLO on.
     """
     views: List[CameraView] = [
         _capture_single_camera_view(
@@ -414,15 +415,6 @@ def _capture_ring_gripper_views(data, renderers: _SceneRenderers) -> List[Camera
             "gripper_center",
         ),
     ]
-    for i, cam_name in enumerate(GRIPPER_CAM_RING_NAMES):
-        views.append(_capture_single_camera_view(
-            data, renderers,
-            renderers.side_rgb_renderers[i],
-            renderers.side_depth_renderers[i],
-            cam_name,
-            renderers.side_intrinsics[i],
-            f"gripper_ring_{i}",
-        ))
     return views
 
 

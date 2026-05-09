@@ -25,10 +25,10 @@ for wall_name in wall_names:
 walls = [
     {
         "name": "wall_a",
-        "pos":  "0.40 -0.20 0.20",
+        "pos":  "0.40 -0.20 0.05",
         "geom": {
             "type": "box",
-            "size": "0.01 0.20 0.20",
+            "size": "0.01 0.20 0.05",
             "rgba": "0.5 0.3 0.2 1",
             "group": "1",
             "contype": "1",
@@ -37,10 +37,10 @@ walls = [
     },
     {
         "name": "wall_b",
-        "pos":  "0.75 0.05 0.25",
+        "pos":  "0.75 0.05 0.05",
         "geom": {
             "type": "box",
-            "size": "0.15 0.01 0.25",
+            "size": "0.15 0.01 0.05",
             "rgba": "0.5 0.3 0.2 1",
             "group": "1",
             "contype": "1",
@@ -49,10 +49,10 @@ walls = [
     },
     {
         "name": "wall_c",
-        "pos":  "0.20 0.10 0.18",
+        "pos":  "0.20 0.10 0.05",
         "geom": {
             "type": "box",
-            "size": "0.01 0.10 0.18",
+            "size": "0.01 0.10 0.05",
             "rgba": "0.5 0.3 0.2 1",
             "group": "1",
             "contype": "1",

@@ -110,14 +110,14 @@
     <!-- Inconvenient walls: thin static box geoms the Cartesian RRT planner
          has to route around. AABBs hard-mirrored in planner.WORLD_OBSTACLES;
          keep them in sync if you move these. -->
-    <body name="wall_a" pos="0.40 -0.20 0.20">
-        <geom type="box" size="0.01 0.20 0.20" rgba="0.5 0.3 0.2 1" group="1" contype="1" conaffinity="1"/>
+    <body name="wall_a" pos="0.40 -0.20 0.05">
+        <geom type="box" size="0.01 0.20 0.05" rgba="0.5 0.3 0.2 1" group="1" contype="1" conaffinity="1"/>
     </body>
-    <body name="wall_b" pos="0.75 0.05 0.25">
-        <geom type="box" size="0.15 0.01 0.25" rgba="0.5 0.3 0.2 1" group="1" contype="1" conaffinity="1"/>
+    <body name="wall_b" pos="0.75 0.05 0.05">
+        <geom type="box" size="0.15 0.01 0.05" rgba="0.5 0.3 0.2 1" group="1" contype="1" conaffinity="1"/>
     </body>
-    <body name="wall_c" pos="0.20 0.10 0.18">
-        <geom type="box" size="0.01 0.10 0.18" rgba="0.5 0.3 0.2 1" group="1" contype="1" conaffinity="1"/>
+    <body name="wall_c" pos="0.20 0.10 0.05">
+        <geom type="box" size="0.01 0.10 0.05" rgba="0.5 0.3 0.2 1" group="1" contype="1" conaffinity="1"/>
     </body>
 
     <light directional="true" diffuse=".2 .2 .2" specular="0 0 0" pos="0 1 5" dir="0 -1 -1" castshadow="false"/>
